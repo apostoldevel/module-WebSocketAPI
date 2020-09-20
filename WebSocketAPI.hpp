@@ -48,7 +48,7 @@ namespace Apostol {
 
             static void AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload);
 
-            static void QueryException(CPQPollQuery *APollQuery, const std::exception &e);
+            static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
             static bool CheckAuthorizationData(CRequest *ARequest, CAuthorization &Authorization);
 
@@ -64,7 +64,7 @@ namespace Apostol {
             void DoSessionDisconnected(CObject *Sender);
 
             void DoPostgresQueryExecuted(CPQPollQuery *APollQuery) override;
-            void DoPostgresQueryException(CPQPollQuery *APollQuery, Delphi::Exception::Exception *AException) override;
+            void DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) override;
 
         public:
 
@@ -86,10 +86,11 @@ namespace Apostol {
                 const CString &Session, const CString &Nonce, const CString &Signature, const CString &Agent,
                 const CString &Host, long int ReceiveWindow = 5000);
 
-            void Execute(CHTTPServerConnection *AConnection) override;
+            bool Execute(CHTTPServerConnection *AConnection) override;
 
             bool Enabled() override;
-            bool CheckConnection(CHTTPServerConnection *AConnection) override;
+
+            bool CheckLocation(const CLocation &Location) override;
 
         };
     }
