@@ -50,11 +50,11 @@ namespace Apostol {
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
-            static bool CheckAuthorizationData(CRequest *ARequest, CAuthorization &Authorization);
+            static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
 
             static int CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError = false);
 
-            static void ReplyError(CHTTPServerConnection *AConnection, CReply::CStatusType ErrorCode, const CString &Message);
+            static void ReplyError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType ErrorCode, const CString &Message);
 
         protected:
 

@@ -164,7 +164,7 @@ namespace Apostol {
                 CWSMessage wsmResponse;
                 CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
 
-                CReply::CStatusType LStatus = CReply::bad_request;
+                CHTTPReply::CStatusType LStatus = CHTTPReply::bad_request;
 
                 try {
                     CString jsonString;
@@ -175,7 +175,7 @@ namespace Apostol {
                     if (LResult->nTuples() == 1) {
                         wsmResponse.ErrorCode = CheckError(wsmResponse.Payload, wsmResponse.ErrorMessage);
                         if (wsmResponse.ErrorCode == 0) {
-                            LStatus = CReply::unauthorized;
+                            LStatus = CHTTPReply::unauthorized;
                             AfterQuery(LConnection, wsmRequest.Action, wsmResponse.Payload);
                         } else {
                             wsmResponse.MessageTypeId = mtCallError;
@@ -221,7 +221,7 @@ namespace Apostol {
                 CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
 
                 wsmResponse.MessageTypeId = mtCallError;
-                wsmResponse.ErrorCode = CReply::internal_server_error;
+                wsmResponse.ErrorCode = CHTTPReply::internal_server_error;
                 wsmResponse.ErrorMessage = E.what();
 
                 CWSProtocol::Response(wsmResponse, LResponse);
@@ -256,7 +256,7 @@ namespace Apostol {
             AConnection->Data().Values("path", Path);
 
             if (!StartQuery(AConnection, SQL)) {
-                AConnection->SendStockReply(CReply::service_unavailable);
+                AConnection->SendStockReply(CHTTPReply::service_unavailable);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -299,7 +299,7 @@ namespace Apostol {
             AConnection->Data().Values("path", Path);
 
             if (!StartQuery(AConnection, SQL)) {
-                AConnection->SendStockReply(CReply::service_unavailable);
+                AConnection->SendStockReply(CHTTPReply::service_unavailable);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -326,7 +326,7 @@ namespace Apostol {
             AConnection->Data().Values("path", Path);
 
             if (!StartQuery(AConnection, SQL)) {
-                AConnection->SendStockReply(CReply::service_unavailable);
+                AConnection->SendStockReply(CHTTPReply::service_unavailable);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -358,11 +358,11 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::ReplyError(CHTTPServerConnection *AConnection, CReply::CStatusType ErrorCode, const CString &Message) {
+        void CWebSocketAPI::ReplyError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType ErrorCode, const CString &Message) {
             auto LReply = AConnection->Reply();
 
-            if (ErrorCode == CReply::unauthorized) {
-                CReply::AddUnauthorized(LReply, AConnection->Data()["Authorization"] != "Basic", "invalid_client", Message.c_str());
+            if (ErrorCode == CHTTPReply::unauthorized) {
+                CHTTPReply::AddUnauthorized(LReply, AConnection->Data()["Authorization"] != "Basic", "invalid_client", Message.c_str());
             }
 
             LReply->Content.Clear();
@@ -372,7 +372,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        bool CWebSocketAPI::CheckAuthorizationData(CRequest *ARequest, CAuthorization &Authorization) {
+        bool CWebSocketAPI::CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization) {
 
             const auto &LHeaders = ARequest->Headers;
             const auto &LCookies = ARequest->Cookies;
@@ -406,13 +406,13 @@ namespace Apostol {
             auto LRequest = AConnection->Request();
             auto LReply = AConnection->Reply();
 
-            LReply->ContentType = CReply::html;
+            LReply->ContentType = CHTTPReply::html;
 
             CStringList LPath;
             SplitColumns(LRequest->Location.pathname, LPath, '/');
 
             if (LPath.Count() != 2) {
-                AConnection->SendStockReply(CReply::bad_request);
+                AConnection->SendStockReply(CHTTPReply::bad_request);
                 return;
             }
 
@@ -422,7 +422,7 @@ namespace Apostol {
             const auto& LSecWebSocketProtocol = LRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
 
             if (LSecWebSocketKey.IsEmpty()) {
-                AConnection->SendStockReply(CReply::bad_request);
+                AConnection->SendStockReply(CHTTPReply::bad_request);
                 return;
             }
 
@@ -524,7 +524,7 @@ namespace Apostol {
                     CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
 
                     wsmResponse.MessageTypeId = mtCallError;
-                    wsmResponse.ErrorCode = CReply::bad_request;
+                    wsmResponse.ErrorCode = CHTTPReply::bad_request;
                     wsmResponse.ErrorMessage = E.what();
 
                     CString LResponse;
