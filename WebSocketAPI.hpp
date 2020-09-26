@@ -54,9 +54,9 @@ namespace Apostol {
 
             static int CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError = false);
 
-            static void ReplyError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType ErrorCode, const CString &Message);
-
         protected:
+
+            static void DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, Delphi::Exception::Exception &E);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
 
@@ -81,6 +81,9 @@ namespace Apostol {
 
             void AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization,
                 const CString &Path, const CString &Payload, const CString &Agent, const CString &Host);
+
+            void PreSignedFetch(CHTTPServerConnection *AConnection, const CString &Path, const CString &Payload,
+                CSession *ASession);
 
             void SignedFetch(CHTTPServerConnection *AConnection, const CString &Path, const CString &Payload,
                 const CString &Session, const CString &Nonce, const CString &Signature, const CString &Agent,

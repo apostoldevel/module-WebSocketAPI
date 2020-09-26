@@ -98,6 +98,9 @@ namespace Apostol {
 
                 if (ErrorCode >= 10000)
                     ErrorCode = ErrorCode / 100;
+
+                if (ErrorCode < 0)
+                    ErrorCode = 400;
             }
 
             return ErrorCode;
@@ -255,8 +258,10 @@ namespace Apostol {
             AConnection->Data().Values("signature", "false");
             AConnection->Data().Values("path", Path);
 
-            if (!StartQuery(AConnection, SQL)) {
-                AConnection->SendStockReply(CHTTPReply::service_unavailable);
+            try {
+                StartQuery(AConnection, SQL);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(AConnection, CHTTPReply::service_unavailable, E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -298,9 +303,28 @@ namespace Apostol {
             AConnection->Data().Values("signature", "false");
             AConnection->Data().Values("path", Path);
 
-            if (!StartQuery(AConnection, SQL)) {
-                AConnection->SendStockReply(CHTTPReply::service_unavailable);
+            try {
+                StartQuery(AConnection, SQL);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(AConnection, CHTTPReply::service_unavailable, E);
             }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::PreSignedFetch(CHTTPServerConnection *AConnection, const CString &Path,
+                const CString &Payload, CSession *ASession) {
+
+            CString LData;
+
+            const auto& LNonce = LongToString(MsEpoch() * 1000);
+
+            LData = Path;
+            LData << LNonce;
+            LData << (Payload.IsEmpty() ? _T("null") : Payload);
+
+            const auto& LSignature = ASession->Secret().IsEmpty() ? _T("") : hmac_sha256(ASession->Secret(), LData);
+
+            SignedFetch(AConnection, Path, Payload, ASession->Session(), LNonce, LSignature, ASession->Agent(), ASession->IP());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -325,8 +349,10 @@ namespace Apostol {
             AConnection->Data().Values("signature", "true");
             AConnection->Data().Values("path", Path);
 
-            if (!StartQuery(AConnection, SQL)) {
-                AConnection->SendStockReply(CHTTPReply::service_unavailable);
+            try {
+                StartQuery(AConnection, SQL);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(AConnection, CHTTPReply::service_unavailable, E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -358,20 +384,6 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::ReplyError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType ErrorCode, const CString &Message) {
-            auto LReply = AConnection->Reply();
-
-            if (ErrorCode == CHTTPReply::unauthorized) {
-                CHTTPReply::AddUnauthorized(LReply, AConnection->Data()["Authorization"] != "Basic", "invalid_client", Message.c_str());
-            }
-
-            LReply->Content.Clear();
-            LReply->Content.Format(R"({"error": {"code": %u, "message": "%s"}})", ErrorCode, Delphi::Json::EncodeJsonString(Message).c_str());
-
-            AConnection->SendReply(ErrorCode, nullptr, true);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
         bool CWebSocketAPI::CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization) {
 
             const auto &LHeaders = ARequest->Headers;
@@ -398,6 +410,28 @@ namespace Apostol {
             }
 
             return true;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, Delphi::Exception::Exception &E) {
+            auto LWSReply = AConnection->WSReply();
+
+            CWSMessage wsmRequest;
+            CWSMessage wsmResponse;
+
+            CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
+
+            wsmResponse.MessageTypeId = mtCallError;
+            wsmResponse.ErrorCode = Status;
+            wsmResponse.ErrorMessage = E.what();
+
+            CString LResponse;
+            CWSProtocol::Response(wsmResponse, LResponse);
+
+            LWSReply->SetPayload(LResponse);
+            AConnection->SendWebSocket();
+
+            Log()->Error(APP_LOG_EMERG, 0, E.what());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -456,7 +490,6 @@ namespace Apostol {
         void CWebSocketAPI::DoWebSocket(CHTTPServerConnection *AConnection) {
 
             auto LWSRequest = AConnection->WSRequest();
-            auto LWSReply = AConnection->WSReply();
 
             const CString LRequest(LWSRequest->Payload());
 
@@ -466,11 +499,9 @@ namespace Apostol {
 
                 auto LSession = CSession::FindOfConnection(AConnection);
 
-                CWSMessage wsmRequest;
-                CWSMessage wsmResponse;
-
                 try {
-                    CString sigData;
+                    CWSMessage wsmRequest;
+                    CWSMessage wsmResponse;
 
                     CWSProtocol::Request(LRequest, wsmRequest);
 
@@ -502,38 +533,15 @@ namespace Apostol {
                     }
 
                     if (wsmRequest.MessageTypeId == mtCall) {
-
-                        sigData = wsmRequest.Action;
-
                         const auto& LPayload = wsmRequest.Payload.ToString();
-
                         if (LAuthorization.Schema != CAuthorization::asUnknown) {
                             AuthorizedFetch(AConnection, LAuthorization, wsmRequest.Action, LPayload, LSession->Agent(), LSession->IP());
                         } else {
-                            const auto& LNonce = LongToString(MsEpoch() * 1000);
-
-                            sigData << LNonce;
-                            sigData << (LPayload.IsEmpty() ? _T("null") : LPayload);
-
-                            const auto& LSignature = LSession->Secret().IsEmpty() ? _T("") : hmac_sha256(LSession->Secret(), sigData);
-
-                            SignedFetch(AConnection, wsmRequest.Action, LPayload, LSession->Session(), LNonce, LSignature, LSession->Agent(), LSession->IP());
+                            PreSignedFetch(AConnection, wsmRequest.Action, LPayload, LSession);
                         }
                     }
                 } catch (Delphi::Exception::Exception &E) {
-                    CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
-
-                    wsmResponse.MessageTypeId = mtCallError;
-                    wsmResponse.ErrorCode = CHTTPReply::bad_request;
-                    wsmResponse.ErrorMessage = E.what();
-
-                    CString LResponse;
-                    CWSProtocol::Response(wsmResponse, LResponse);
-
-                    LWSReply->SetPayload(LResponse);
-                    AConnection->SendWebSocket();
-
-                    Log()->Error(APP_LOG_EMERG, 0, E.what());
+                    DoError(AConnection, CHTTPReply::bad_request, E);
                 }
             } catch (Delphi::Exception::Exception &E) {
                 AConnection->SendWebSocketClose();
