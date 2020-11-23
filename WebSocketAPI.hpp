@@ -40,9 +40,23 @@ namespace Apostol {
         class CWebSocketAPI: public CApostolModule {
         private:
 
+            int m_HeartbeatInterval;
+
+            struct timeval m_NotifyDate;
+
             CDateTime m_FixedDate;
+            CDateTime m_CheckDate;
+
+            TPairs<CStringPairs> m_Tokens;
 
             CSessionManager m_SessionManager;
+
+            void ProviderAccessToken(const CProvider& Provider);
+
+            void FetchProviders();
+            void CheckProviders();
+
+            void CheckNotify();
 
             void InitMethods() override;
 
@@ -56,7 +70,10 @@ namespace Apostol {
 
         protected:
 
-            static void DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, Delphi::Exception::Exception &E);
+            void DoError(const Delphi::Exception::Exception &E);
+
+            static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
+            static void DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, const Delphi::Exception::Exception &E);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
 
@@ -76,6 +93,8 @@ namespace Apostol {
                 return new CWebSocketAPI(AProcess);
             }
 
+            static CString CreateServiceToken(const CProvider& Provider, const CString &Application);
+
             void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Path, const CString &Payload,
                 const CString &Agent, const CString &Host);
 
@@ -90,6 +109,8 @@ namespace Apostol {
                 const CString &Host, long int ReceiveWindow = 5000);
 
             bool Execute(CHTTPServerConnection *AConnection) override;
+
+            void Heartbeat() override;
 
             bool Enabled() override;
 

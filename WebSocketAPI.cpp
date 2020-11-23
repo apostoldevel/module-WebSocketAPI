@@ -27,6 +27,12 @@ Author:
 #include "WebSocketAPI.hpp"
 //----------------------------------------------------------------------------------------------------------------------
 
+#include "jwt.h"
+//----------------------------------------------------------------------------------------------------------------------
+
+#define PROVIDER_NAME "default"
+#define PROVIDER_APPLICATION_NAME "service"
+
 extern "C++" {
 
 namespace Apostol {
@@ -39,12 +45,17 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "web socket api") {
+        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "web socket api"),
+            m_NotifyDate{0, 0} {
+
             m_Headers.Add("Authorization");
             m_Headers.Add("Session");
             m_Headers.Add("Secret");
 
             m_FixedDate = Now();
+            m_CheckDate = m_FixedDate;
+
+            m_HeartbeatInterval = 5000;
 
             CWebSocketAPI::InitMethods();
         }
@@ -164,7 +175,7 @@ namespace Apostol {
                 CWSMessage wsmResponse;
                 CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
 
-                CHTTPReply::CStatusType LStatus = CHTTPReply::bad_request;
+                CHTTPReply::CStatusType status = CHTTPReply::bad_request;
 
                 try {
                     CString jsonString;
@@ -175,7 +186,7 @@ namespace Apostol {
                     if (pResult->nTuples() == 1) {
                         wsmResponse.ErrorCode = CheckError(wsmResponse.Payload, wsmResponse.ErrorMessage);
                         if (wsmResponse.ErrorCode == 0) {
-                            LStatus = CHTTPReply::unauthorized;
+                            status = CHTTPReply::unauthorized;
                             AfterQuery(pConnection, wsmRequest.Action, wsmResponse.Payload);
                         } else {
                             wsmResponse.MessageTypeId = mtCallError;
@@ -183,7 +194,7 @@ namespace Apostol {
                     }
                 } catch (Delphi::Exception::Exception &E) {
                     wsmResponse.MessageTypeId = mtCallError;
-                    wsmResponse.ErrorCode = LStatus;
+                    wsmResponse.ErrorCode = status;
                     wsmResponse.ErrorMessage = E.what();
 
                     Log()->Error(APP_LOG_EMERG, 0, E.what());
@@ -367,17 +378,17 @@ namespace Apostol {
         void CWebSocketAPI::DoSessionDisconnected(CObject *Sender) {
             auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
             if (pConnection != nullptr) {
-                auto LSession = m_SessionManager.FindByConnection(pConnection);
-                if (LSession != nullptr) {
+                auto pSession = m_SessionManager.FindByConnection(pConnection);
+                if (pSession != nullptr) {
                     if (!pConnection->ClosedGracefully()) {
                         Log()->Message(_T("[%s:%d] WebSocket Session %s: Closed connection."),
                                        pConnection->Socket()->Binding()->PeerIP(),
                                        pConnection->Socket()->Binding()->PeerPort(),
-                                       LSession->Identity().IsEmpty() ? "(empty)" : LSession->Identity().c_str()
+                                       pSession->Identity().IsEmpty() ? "(empty)" : pSession->Identity().c_str()
                         );
                     }
-                    if (LSession->UpdateCount() == 0) {
-                        delete LSession;
+                    if (pSession->UpdateCount() == 0) {
+                        delete pSession;
                     }
                 } else {
                     if (!pConnection->ClosedGracefully()) {
@@ -418,7 +429,31 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, Delphi::Exception::Exception &E) {
+        void CWebSocketAPI::DoError(const Delphi::Exception::Exception &E) {
+            m_CheckDate = Now() + (CDateTime) 30 / SecsPerDay;
+            Log()->Error(APP_LOG_EMERG, 0, E.what());
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload) {
+            auto pWSReply = AConnection->WSReply();
+
+            CWSMessage wsmMessage;
+
+            wsmMessage.MessageTypeId = mtCall;
+            wsmMessage.UniqueId = GetUID(42);
+            wsmMessage.Action = Action;
+            wsmMessage.Payload << Payload;
+
+            CString sMessage;
+            CWSProtocol::Response(wsmMessage, sMessage);
+
+            pWSReply->SetPayload(sMessage);
+            AConnection->SendWebSocket(true);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, const Delphi::Exception::Exception &E) {
             auto pWSReply = AConnection->WSReply();
 
             CWSMessage wsmRequest;
@@ -568,6 +603,173 @@ namespace Apostol {
             } else {
                 return CApostolModule::Execute(AConnection);
             }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CString CWebSocketAPI::CreateServiceToken(const CProvider &Provider, const CString &Application) {
+
+            CStringList issuers;
+            Provider.GetIssuers(Application, issuers);
+
+            CStringList scopes;
+            Provider.GetScopes(Application, scopes);
+
+            const auto& alg = std::string(Provider.Algorithm(Application));
+            const auto& iss = std::string(issuers.Count() != 0 ? issuers.Names(0) : "");
+            const auto& aud = std::string(Provider.ClientId(Application));
+            const auto& secret = std::string(Provider.Secret(Application));
+            const auto& scope = std::string("api");
+
+            auto token = jwt::create()
+                    .set_issuer(iss)
+                    .set_audience(aud)
+                    .set_payload_claim("scope", jwt::claim(scope))
+                    .set_issued_at(std::chrono::system_clock::now())
+                    .set_expires_at(std::chrono::system_clock::now() + std::chrono::seconds{3600});
+
+            if (alg == "HS256") {
+                return token.sign(jwt::algorithm::hs256{secret});
+            } else if (alg == "HS384") {
+                return token.sign(jwt::algorithm::hs384{secret});
+            } else if (alg == "HS512") {
+                return token.sign(jwt::algorithm::hs512{secret});
+            }
+
+            return CString();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::ProviderAccessToken(const CProvider &Provider) {
+
+            auto OnDone = [this](CTCPConnection *Sender) {
+
+                auto pConnection = dynamic_cast<CHTTPClientConnection *> (Sender);
+                auto pReply = pConnection->Reply();
+
+                DebugReply(pReply);
+
+                const CJSON Json(pReply->Content);
+
+                m_Tokens[PROVIDER_NAME].Values("access_token", Json["access_token"].AsString());
+
+                return true;
+            };
+
+            CString token_uri(Provider.TokenURI(PROVIDER_APPLICATION_NAME));
+
+            const auto &service_token = CreateServiceToken(Provider, PROVIDER_APPLICATION_NAME);
+
+            m_Tokens[PROVIDER_NAME].Values("service_token", service_token);
+
+            if (!token_uri.IsEmpty()) {
+                if (token_uri.front() == '/') {
+                    token_uri = CString().Format("http://%s:%d%s", "localhost", Config()->Port(), token_uri.c_str());
+                }
+                m_pModuleProcess->FetchAccessToken(token_uri, service_token, OnDone);
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::FetchProviders() {
+            auto& Providers = Server().Providers();
+            for (int i = 0; i < Providers.Count(); i++) {
+                auto& Provider = Providers[i].Value();
+                if (Provider.ApplicationExists(PROVIDER_APPLICATION_NAME)) {
+                    if (Provider.KeyStatus == CProvider::ksUnknown) {
+                        ProviderAccessToken(Provider);
+                    }
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::CheckProviders() {
+            auto& Providers = Server().Providers();
+            for (int i = 0; i < Providers.Count(); i++) {
+                auto& Provider = Providers[i].Value();
+                if (Provider.ApplicationExists(PROVIDER_APPLICATION_NAME)) {
+                    if (Provider.KeyStatus != CProvider::ksUnknown) {
+                        Provider.KeyStatusTime = Now();
+                        Provider.KeyStatus = CProvider::ksUnknown;
+                    }
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::CheckNotify() {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+
+                try {
+                    auto pResult = APollQuery->Results(0);
+
+                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                    }
+
+                    if (pResult->nTuples() != 0) {
+                        CString jsonString;
+                        PQResultToJson(pResult, jsonString, true);
+
+                        for (int i = 0; i < m_SessionManager.Count(); i++) {
+                            auto pSession = m_SessionManager[i];
+                            if (!pSession->Session().IsEmpty()) {
+                                DoCall(pSession->Connection(), "/notify", jsonString);
+                            }
+                        }
+                    }
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
+                }
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                DoError(E);
+            };
+
+            const auto &access_token = m_Tokens[PROVIDER_NAME]["access_token"];
+
+            if (!access_token.IsEmpty()) {
+                CStringList SQL;
+
+                SQL.Add(CString().Format("SELECT * FROM daemon.fetch(%s, '%s', '%s'::jsonb);",
+                                         PQQuoteLiteral(access_token).c_str(),
+                                         "/notify/section",
+                                         CString().Format(R"({"start": %d})", m_NotifyDate.tv_sec).c_str()
+                ));
+
+                try {
+                    ExecSQL(SQL, nullptr, OnExecuted, OnException);
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::Heartbeat() {
+            auto now = Now();
+
+            if (now >= m_FixedDate) {
+                m_FixedDate = now + (CDateTime) 55 / MinsPerDay; // 55 min
+
+                CheckProviders();
+                FetchProviders();
+            }
+
+            if (now >= m_CheckDate) {
+                if (m_NotifyDate.tv_sec == 0) {
+                    gettimeofday(&m_NotifyDate, nullptr);
+                }
+
+                CheckNotify();
+
+                gettimeofday(&m_NotifyDate, nullptr);
+                m_CheckDate = now + (CDateTime) m_HeartbeatInterval / MSecsPerDay;
+            }
+
+            CApostolModule::Heartbeat();
         }
         //--------------------------------------------------------------------------------------------------------------
 
