@@ -73,7 +73,7 @@ namespace Apostol {
             void DoError(const Delphi::Exception::Exception &E);
 
             static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
-            static void DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, const Delphi::Exception::Exception &E);
+            static void DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, const std::exception &e);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
 
@@ -93,20 +93,22 @@ namespace Apostol {
                 return new CWebSocketAPI(AProcess);
             }
 
+            CString VerifyToken(const CString &Token);
+
             static CString CreateServiceToken(const CProvider& Provider, const CString &Application);
 
-            void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Path, const CString &Payload,
-                const CString &Agent, const CString &Host);
+            void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
+                const CString &Payload, const CString &Agent, const CString &Host);
 
             void AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization,
-                const CString &Path, const CString &Payload, const CString &Agent, const CString &Host);
+                const CString &Method, const CString &Path, const CString &Payload, const CString &Agent, const CString &Host);
 
-            void PreSignedFetch(CHTTPServerConnection *AConnection, const CString &Path, const CString &Payload,
-                CSession *ASession);
+            void PreSignedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
+                const CString &Payload, CSession *ASession);
 
-            void SignedFetch(CHTTPServerConnection *AConnection, const CString &Path, const CString &Payload,
-                const CString &Session, const CString &Nonce, const CString &Signature, const CString &Agent,
-                const CString &Host, long int ReceiveWindow = 5000);
+            void SignedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
+                const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
+                const CString &Agent, const CString &Host, long int ReceiveWindow = 5000);
 
             bool Execute(CHTTPServerConnection *AConnection) override;
 
