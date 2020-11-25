@@ -803,7 +803,7 @@ namespace Apostol {
 
                 SQL.Add(CString().Format("SELECT * FROM daemon.fetch(%s, 'POST', '%s', '%s'::jsonb);",
                                          PQQuoteLiteral(access_token).c_str(),
-                                         "/api/v1/notify/section",
+                                         "/api/v1/notification",
                                          CString().Format(R"({"start": %d})", m_NotifyDate.tv_sec).c_str()
                 ));
 
