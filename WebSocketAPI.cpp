@@ -602,9 +602,9 @@ namespace Apostol {
                     if (wsmRequest.MessageTypeId == mtCall) {
                         const auto& caPayload = wsmRequest.Payload.ToString();
                         if (caAuthorization.Schema != CAuthorization::asUnknown) {
-                            AuthorizedFetch(AConnection, caAuthorization, "POST", wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
+                            AuthorizedFetch(AConnection, caAuthorization, "POST", "/api/v1" + wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
                         } else {
-                            PreSignedFetch(AConnection, "POST", wsmRequest.Action, caPayload, pSession);
+                            PreSignedFetch(AConnection, "POST", "/api/v1" + wsmRequest.Action, caPayload, pSession);
                         }
                     }
                 } catch (jwt::token_expired_exception &e) {
