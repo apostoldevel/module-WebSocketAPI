@@ -445,7 +445,9 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoError(const Delphi::Exception::Exception &E) {
-            m_CheckDate = Now() + (CDateTime) 30 / SecsPerDay;
+            const auto now = Now();
+            m_FixedDate = now + (CDateTime) m_HeartbeatInterval * 2 / MSecsPerDay;
+            m_CheckDate = now + (CDateTime) m_HeartbeatInterval * 3 / MSecsPerDay;
             Log()->Error(APP_LOG_EMERG, 0, E.what());
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -776,6 +778,13 @@ namespace Apostol {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
                     }
 
+                    if (pResult->nTuples() == 1) {
+                        const CJSON Payload(pResult->GetValue(0, 0));
+                        CString errorMessage;
+                        if (CheckError(Payload, errorMessage) != 0)
+                            throw Delphi::Exception::EDBError(errorMessage.c_str());
+                    }
+
                     if (pResult->nTuples() != 0) {
                         CString jsonString;
                         PQResultToJson(pResult, jsonString, true);
@@ -801,10 +810,9 @@ namespace Apostol {
             if (!access_token.IsEmpty()) {
                 CStringList SQL;
 
-                SQL.Add(CString().Format("SELECT * FROM daemon.fetch(%s, 'POST', '%s', '%s'::jsonb);",
+                SQL.Add(CString().Format("SELECT * FROM daemon.notification(%s, %d);",
                                          PQQuoteLiteral(access_token).c_str(),
-                                         "/api/v1/notification",
-                                         CString().Format(R"({"start": %d})", m_NotifyDate.tv_sec).c_str()
+                                         m_NotifyDate.tv_sec
                 ));
 
                 try {
