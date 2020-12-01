@@ -144,11 +144,11 @@ namespace Apostol {
                 }
             };
 
-            if (Path == _T("/sign/in")) {
+            if (Path == _T("/api/v1/sign/in")) {
                 SignIn(Payload);
-            } else if (Path == _T("/sign/out")) {
+            } else if (Path == _T("/api/v1/sign/out")) {
                 SignOut(Payload);
-            } else if (Path == _T("/authorize")) {
+            } else if (Path == _T("/api/v1/authorize")) {
                 Authorize(Payload);
             }
         }
@@ -190,7 +190,7 @@ namespace Apostol {
                     wsmResponse.Payload << jsonString;
 
                     if (pResult->nTuples() == 1) {
-                        wsmResponse.ErrorCode = CheckError(wsmResponse.Payload, wsmResponse.ErrorMessage);
+                        wsmResponse.ErrorCode = CheckError(bDataArray ? wsmResponse.Payload[0] : wsmResponse.Payload, wsmResponse.ErrorMessage);
                         if (wsmResponse.ErrorCode == 0) {
                             status = CHTTPReply::unauthorized;
                             AfterQuery(pConnection, caPath, wsmResponse.Payload);
