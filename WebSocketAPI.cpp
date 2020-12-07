@@ -275,7 +275,7 @@ namespace Apostol {
             AConnection->Data().Values("signature", "false");
 
             try {
-                StartQuery(AConnection, SQL);
+                ExecSQL(SQL, AConnection);
             } catch (Delphi::Exception::Exception &E) {
                 DoError(AConnection, CHTTPReply::service_unavailable, E);
             }
@@ -331,7 +331,7 @@ namespace Apostol {
             AConnection->Data().Values("signature", "false");
 
             try {
-                StartQuery(AConnection, SQL);
+                ExecSQL(SQL, AConnection);
             } catch (Delphi::Exception::Exception &E) {
                 DoError(AConnection, CHTTPReply::service_unavailable, E);
             }
@@ -383,7 +383,7 @@ namespace Apostol {
             AConnection->Data().Values("signature", "true");
 
             try {
-                StartQuery(AConnection, SQL);
+                ExecSQL(SQL, AConnection);
             } catch (Delphi::Exception::Exception &E) {
                 DoError(AConnection, CHTTPReply::service_unavailable, E);
             }
