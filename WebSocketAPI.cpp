@@ -839,7 +839,7 @@ namespace Apostol {
                     gettimeofday(&m_NotifyDate, nullptr);
                 }
 
-                CheckNotify();
+                //CheckNotify();
 
                 gettimeofday(&m_NotifyDate, nullptr);
                 m_CheckDate = now + (CDateTime) m_HeartbeatInterval / MSecsPerDay;
