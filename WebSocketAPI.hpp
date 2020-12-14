@@ -56,7 +56,7 @@ namespace Apostol {
             void FetchProviders();
             void CheckProviders();
 
-            void CheckNotify();
+            void CheckNotify(CSession *ASession);
 
             void InitMethods() override;
 

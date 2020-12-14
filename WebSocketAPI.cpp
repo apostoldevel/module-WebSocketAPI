@@ -148,6 +148,8 @@ namespace Apostol {
                 SignIn(Payload);
             } else if (Path == _T("/api/v1/sign/out")) {
                 SignOut(Payload);
+            } else if (Path == _T("/api/v1/authenticate")) {
+                Authorize(Payload);
             } else if (Path == _T("/api/v1/authorize")) {
                 Authorize(Payload);
             }
@@ -507,8 +509,12 @@ namespace Apostol {
                 return;
             }
 
-            const auto& caIdentity = cPath[1].Lower() == _T("api") ? ApostolUID() : cPath[1];
+            if (cPath[0] != "session") {
+                AConnection->SendStockReply(CHTTPReply::not_found);
+                return;
+            }
 
+            const auto& caIdentity = cPath[1];
             const auto& caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
             const auto& caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
 
@@ -562,38 +568,50 @@ namespace Apostol {
 
                     CWSProtocol::Request(csRequest, wsmRequest);
 
-                    const auto &caAuthorization = pSession->Authorization();
-
                     if (wsmRequest.MessageTypeId == mtOpen) {
-                        if (wsmRequest.Payload.HasOwnProperty("session")) {
-                            wsmRequest.Action = _T("/authorize");
+
+                        if (wsmRequest.Payload.HasOwnProperty("secret")) {
+                            wsmRequest.Action = _T("/api/v1/authenticate");
 
                             pSession->Session() = wsmRequest.Payload[_T("session")].AsString();
                             pSession->Secret() = wsmRequest.Payload[_T("secret")].AsString();
 
-                            if (pSession->Session().IsEmpty() || pSession->Secret().IsEmpty())
-                                throw Delphi::Exception::Exception(_T("Session or secret cannot be empty."));
+                            if (pSession->Session().IsEmpty())
+                                pSession->Session() = pSession->Identity();
 
-                            wsmRequest.Payload -= _T("secret");
-                        } else if (wsmRequest.Payload.HasOwnProperty("access_token")) {
-                            wsmRequest.Action = _T("/authorize");
+                            if (pSession->Session() != pSession->Identity())
+                                throw Delphi::Exception::Exception(_T("Invalid session value."));
 
-                            const auto& access_token = wsmRequest.Payload[_T("access_token")].AsString();
+                            if (pSession->Secret().IsEmpty())
+                                throw Delphi::Exception::Exception(_T("Secret cannot be empty."));
 
-                            pSession->Session() = VerifyToken(access_token);
+                            wsmRequest.Payload.Clear();
+                            wsmRequest.Payload.Object().AddPair(_T("session"), pSession->Session());
+                            wsmRequest.Payload.Object().AddPair(_T("secret"), pSession->Secret());
+                            wsmRequest.Payload.Object().AddPair(_T("agent"), pSession->Agent());
+                            wsmRequest.Payload.Object().AddPair(_T("host"), pSession->IP());
 
-                            pSession->Authorization() << "Bearer " + access_token;
+                        } else if (wsmRequest.Payload.HasOwnProperty("token")) {
+                            wsmRequest.Action = _T("/api/v1/authorize");
 
-                            wsmRequest.Payload << CString().Format(R"({"session": "%s"})", pSession->Session().c_str());
-                        } else {
-                            if (caAuthorization.Schema == CAuthorization::asBasic) {
-                                wsmRequest.Action = _T("/sign/in");
-                                wsmRequest.Payload.Object().AddPair(_T("username"), pSession->Authorization().Username);
-                                wsmRequest.Payload.Object().AddPair(_T("password"), pSession->Authorization().Password);
-                            }
+                            const auto& token = wsmRequest.Payload[_T("token")].AsString();
+
+                            if (pSession->Identity() != VerifyToken(token))
+                                throw Delphi::Exception::Exception(_T("Token from another session."));
+
+                            pSession->Session() = pSession->Identity();
+                            pSession->Authorization() << "Bearer " + token;
+
+                            wsmRequest.Payload.Clear();
+                            wsmRequest.Payload.Object().AddPair(_T("session"), pSession->Session());
+                            wsmRequest.Payload.Object().AddPair(_T("agent"), pSession->Agent());
+                            wsmRequest.Payload.Object().AddPair(_T("host"), pSession->IP());
                         }
 
                         wsmRequest.MessageTypeId = mtCall;
+                        UnauthorizedFetch(AConnection, "POST", wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
+
+                        return;
                     } else if (wsmRequest.MessageTypeId == mtClose) {
                         wsmRequest.Action = _T("/sign/out");
                         wsmRequest.MessageTypeId = mtCall;
@@ -601,10 +619,16 @@ namespace Apostol {
 
                     if (wsmRequest.MessageTypeId == mtCall) {
                         const auto& caPayload = wsmRequest.Payload.ToString();
+
+                        if (wsmRequest.Action.SubString(0, 8) != _T("/api/v1/"))
+                            wsmRequest.Action = _T("/api/v1") + wsmRequest.Action;
+
+                        const auto &caAuthorization = pSession->Authorization();
+
                         if (caAuthorization.Schema != CAuthorization::asUnknown) {
-                            AuthorizedFetch(AConnection, caAuthorization, "POST", "/api/v1" + wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
+                            AuthorizedFetch(AConnection, caAuthorization, "POST", wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
                         } else {
-                            PreSignedFetch(AConnection, "POST", "/api/v1" + wsmRequest.Action, caPayload, pSession);
+                            PreSignedFetch(AConnection, "POST", wsmRequest.Action, caPayload, pSession);
                         }
                     }
                 } catch (jwt::token_expired_exception &e) {
@@ -767,12 +791,13 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::CheckNotify() {
+        void CWebSocketAPI::CheckNotify(CSession *ASession) {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
 
                 try {
                     auto pResult = APollQuery->Results(0);
+                    auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
@@ -788,13 +813,7 @@ namespace Apostol {
                     if (pResult->nTuples() != 0) {
                         CString jsonString;
                         PQResultToJson(pResult, jsonString, true);
-
-                        for (int i = 0; i < m_SessionManager.Count(); i++) {
-                            auto pSession = m_SessionManager[i];
-                            if (pSession->Authorized()) {
-                                DoCall(pSession->Connection(), "/notify", jsonString);
-                            }
-                        }
+                        DoCall(pConnection, "/notify", jsonString);
                     }
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
@@ -805,18 +824,19 @@ namespace Apostol {
                 DoError(E);
             };
 
-            const auto &access_token = m_Tokens[PROVIDER_NAME]["access_token"];
+            if (ASession->Authorized()) {
 
-            if (!access_token.IsEmpty()) {
                 CStringList SQL;
 
-                SQL.Add(CString().Format("SELECT * FROM daemon.notification(%s, %d);",
-                                         PQQuoteLiteral(access_token).c_str(),
-                                         m_NotifyDate.tv_sec
+                SQL.Add(CString().Format("SELECT * FROM daemon.notification(%d, '%s', %s, %s);",
+                                         m_NotifyDate.tv_sec,
+                                         ASession->Session().c_str(),
+                                         PQQuoteLiteral(ASession->Agent()).c_str(),
+                                         PQQuoteLiteral(ASession->IP()).c_str()
                 ));
 
                 try {
-                    ExecSQL(SQL, nullptr, OnExecuted, OnException);
+                    ExecSQL(SQL, ASession->Connection(), OnExecuted, OnException);
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
                 }
@@ -839,7 +859,8 @@ namespace Apostol {
                     gettimeofday(&m_NotifyDate, nullptr);
                 }
 
-                //CheckNotify();
+                for (int i = 0; i < m_SessionManager.Count(); ++i)
+                    CheckNotify(m_SessionManager[i]);
 
                 gettimeofday(&m_NotifyDate, nullptr);
                 m_CheckDate = now + (CDateTime) m_HeartbeatInterval / MSecsPerDay;
@@ -857,7 +878,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         bool CWebSocketAPI::CheckLocation(const CLocation &Location) {
-            return Location.pathname == _T("/ws/api") || Location.pathname.SubString(0, 9) == _T("/session/");
+            return Location.pathname.SubString(0, 9) == _T("/session/");
         }
         //--------------------------------------------------------------------------------------------------------------
     }
