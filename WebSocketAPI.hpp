@@ -42,21 +42,13 @@ namespace Apostol {
 
             int m_HeartbeatInterval;
 
-            struct timeval m_NotifyDate;
+            struct timeval m_ObserverDate;
 
-            CDateTime m_FixedDate;
             CDateTime m_CheckDate;
-
-            TPairs<CStringPairs> m_Tokens;
 
             CSessionManager m_SessionManager;
 
-            void ProviderAccessToken(const CProvider& Provider);
-
-            void FetchProviders();
-            void CheckProviders();
-
-            void CheckNotify(CSession *ASession);
+            void Observer(CSession *ASession, struct timeval ADate);
 
             void InitMethods() override;
 
@@ -94,8 +86,6 @@ namespace Apostol {
             }
 
             CString VerifyToken(const CString &Token);
-
-            static CString CreateServiceToken(const CProvider& Provider, const CString &Application);
 
             void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
                 const CString &Payload, const CString &Agent, const CString &Host);
