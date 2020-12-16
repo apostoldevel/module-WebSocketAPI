@@ -115,6 +115,37 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        CHTTPReply::CStatusType CWebSocketAPI::ErrorCodeToStatus(int ErrorCode) {
+            CHTTPReply::CStatusType Status = CHTTPReply::ok;
+
+            if (ErrorCode != 0) {
+                switch (ErrorCode) {
+                    case 401:
+                        Status = CHTTPReply::unauthorized;
+                        break;
+
+                    case 403:
+                        Status = CHTTPReply::forbidden;
+                        break;
+
+                    case 404:
+                        Status = CHTTPReply::not_found;
+                        break;
+
+                    case 500:
+                        Status = CHTTPReply::internal_server_error;
+                        break;
+
+                    default:
+                        Status = CHTTPReply::bad_request;
+                        break;
+                }
+            }
+
+            return Status;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CWebSocketAPI::AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload) {
 
             auto pSession = CSession::FindOfConnection(AConnection);
@@ -133,6 +164,7 @@ namespace Apostol {
             auto SignOut = [pSession](const CJSON &Payload) {
                 pSession->Session().Clear();
                 pSession->Secret().Clear();
+                pSession->Authorization().Clear();
                 pSession->Authorized(false);
             };
 
@@ -143,6 +175,7 @@ namespace Apostol {
                 }
 
                 if (!pSession->Authorized()) {
+                    pSession->Session().Clear();
                     pSession->Secret().Clear();
                     pSession->Authorization().Clear();
 
@@ -176,19 +209,15 @@ namespace Apostol {
 
             if (pConnection != nullptr && pConnection->Connected()) {
 
-                const auto& caPath = pConnection->Data()["path"].Lower();
-                const auto bDataArray = caPath.Find(_T("/list")) != CString::npos;
-
-                auto pWSRequest = pConnection->WSRequest();
                 auto pWSReply = pConnection->WSReply();
 
-                const CString csRequest(pWSRequest->Payload());
-
-                CWSMessage wsmRequest;
-                CWSProtocol::Request(csRequest, wsmRequest);
-
                 CWSMessage wsmResponse;
-                CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
+
+                wsmResponse.MessageTypeId = mtCallResult;
+                wsmResponse.UniqueId = APollQuery->Data()[_T("UniqueId")];
+                wsmResponse.Action = APollQuery->Data()[_T("Action")];
+
+                const auto bDataArray = wsmResponse.Action.Find(_T("/list")) != CString::npos;
 
                 CHTTPReply::CStatusType status = CHTTPReply::bad_request;
 
@@ -202,7 +231,7 @@ namespace Apostol {
                         wsmResponse.ErrorCode = CheckError(bDataArray ? wsmResponse.Payload[0] : wsmResponse.Payload, wsmResponse.ErrorMessage);
                         if (wsmResponse.ErrorCode == 0) {
                             status = CHTTPReply::unauthorized;
-                            AfterQuery(pConnection, caPath, wsmResponse.Payload);
+                            AfterQuery(pConnection, wsmResponse.Action, wsmResponse.Payload);
                         } else {
                             wsmResponse.MessageTypeId = mtCallError;
                         }
@@ -261,38 +290,37 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, const CString &Agent, const CString &Host) {
+        void CWebSocketAPI::UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
+                const CString &Action, const CString &Payload, const CString &Agent, const CString &Host) {
 
             CStringList SQL;
 
             const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
 
             SQL.Add(CString()
-                            .MaxFormatSize(256 + Method.Size() + Path.Size() + caPayload.Size() + Agent.Size())
-                            .Format("SELECT * FROM daemon.unauthorized_fetch(%s, %s, %s::jsonb, %s, %s);",
-                                    PQQuoteLiteral(Method).c_str(),
-                                    PQQuoteLiteral(Path).c_str(),
+                            .MaxFormatSize(256 + Action.Size() + caPayload.Size() + Agent.Size())
+                            .Format("SELECT * FROM daemon.unauthorized_fetch('POST', %s, %s::jsonb, %s, %s);",
+                                    PQQuoteLiteral(Action).c_str(),
                                     caPayload.c_str(),
                                     PQQuoteLiteral(Agent).c_str(),
                                     PQQuoteLiteral(Host).c_str()
             ));
 
-            AConnection->Data().Values("method", Method);
-            AConnection->Data().Values("path", Path);
             AConnection->Data().Values("authorized", "false");
             AConnection->Data().Values("signature", "false");
 
             try {
-                ExecSQL(SQL, AConnection);
+                auto pQuery = ExecSQL(SQL, AConnection);
+                pQuery->Data().Values(_T("UniqueId"), UniqueId);
+                pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, CHTTPReply::service_unavailable, E);
+                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization,
-                const CString &Method, const CString &Path, const CString &Payload, const CString &Agent, const CString &Host) {
+                const CString &UniqueId, const CString &Action, const CString &Payload, const CString &Agent, const CString &Host) {
 
             CStringList SQL;
 
@@ -301,11 +329,10 @@ namespace Apostol {
                 const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
 
                 SQL.Add(CString()
-                                .MaxFormatSize(256 + Authorization.Token.Size() + Method.Size() + Path.Size() + caPayload.Size() + Agent.Size())
-                                .Format("SELECT * FROM daemon.fetch(%s, %s, %s, %s::jsonb, %s, %s);",
+                                .MaxFormatSize(256 + Authorization.Token.Size() + Action.Size() + caPayload.Size() + Agent.Size())
+                                .Format("SELECT * FROM daemon.fetch(%s, 'POST', %s, %s::jsonb, %s, %s);",
                                         PQQuoteLiteral(Authorization.Token).c_str(),
-                                        PQQuoteLiteral(Method).c_str(),
-                                        PQQuoteLiteral(Path).c_str(),
+                                        PQQuoteLiteral(Action).c_str(),
                                         caPayload.c_str(),
                                         PQQuoteLiteral(Agent).c_str(),
                                         PQQuoteLiteral(Host).c_str()
@@ -316,13 +343,12 @@ namespace Apostol {
                 const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
 
                 SQL.Add(CString()
-                                .MaxFormatSize(256 + Method.Size() + Path.Size() + caPayload.Size() + Agent.Size())
-                                .Format("SELECT * FROM daemon.%s_fetch(%s, %s, %s, %s, %s::jsonb, %s, %s);",
+                                .MaxFormatSize(256 + Action.Size() + caPayload.Size() + Agent.Size())
+                                .Format("SELECT * FROM daemon.%s_fetch(%s, %s, 'POST', %s, %s::jsonb, %s, %s);",
                                         Authorization.Type == CAuthorization::atSession ? "session" : "authorized",
                                         PQQuoteLiteral(Authorization.Username).c_str(),
                                         PQQuoteLiteral(Authorization.Password).c_str(),
-                                        PQQuoteLiteral(Method).c_str(),
-                                        PQQuoteLiteral(Path).c_str(),
+                                        PQQuoteLiteral(Action).c_str(),
                                         caPayload.c_str(),
                                         PQQuoteLiteral(Agent).c_str(),
                                         PQQuoteLiteral(Host).c_str()
@@ -330,53 +356,52 @@ namespace Apostol {
 
             } else {
 
-                return UnauthorizedFetch(AConnection, Method, Path, Payload, Agent, Host);
+                return UnauthorizedFetch(AConnection, UniqueId, Action, Payload, Agent, Host);
 
             }
 
-            AConnection->Data().Values("method", Method);
-            AConnection->Data().Values("path", Path);
             AConnection->Data().Values("authorized", "true");
             AConnection->Data().Values("signature", "false");
 
             try {
-                ExecSQL(SQL, AConnection);
+                auto pQuery = ExecSQL(SQL, AConnection);
+                pQuery->Data().Values(_T("UniqueId"), UniqueId);
+                pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, CHTTPReply::service_unavailable, E);
+                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::PreSignedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, CSession *ASession) {
+        void CWebSocketAPI::PreSignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
+                const CString &Action, const CString &Payload, CSession *ASession) {
 
             CString sData;
 
             const auto& caNonce = LongToString(MsEpoch() * 1000);
 
-            sData = Path;
+            sData = Action;
             sData << caNonce;
             sData << (Payload.IsEmpty() ? _T("null") : Payload);
 
             const auto& caSignature = ASession->Secret().IsEmpty() ? _T("") : hmac_sha256(ASession->Secret(), sData);
 
-            SignedFetch(AConnection, Method, Path, Payload, ASession->Session(), caNonce, caSignature, ASession->Agent(), ASession->IP());
+            SignedFetch(AConnection, UniqueId, Action, Payload, ASession->Session(), caNonce, caSignature, ASession->Agent(), ASession->IP());
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::SignedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
-                const CString &Agent, const CString &Host, long int ReceiveWindow) {
+        void CWebSocketAPI::SignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
+                const CString &Action, const CString &Payload, const CString &Session, const CString &Nonce,
+                const CString &Signature, const CString &Agent, const CString &Host, long int ReceiveWindow) {
 
             CStringList SQL;
 
             const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
 
             SQL.Add(CString()
-                            .MaxFormatSize(256 + Method.Size() + Path.Size() + caPayload.Size() + Session.Size() + Nonce.Size() + Signature.Size() + Agent.Size())
-                            .Format("SELECT * FROM daemon.signed_fetch(%s, %s, %s::json, %s, %s, %s, %s, %s, INTERVAL '%d milliseconds');",
-                                    PQQuoteLiteral(Method).c_str(),
-                                    PQQuoteLiteral(Path).c_str(),
+                            .MaxFormatSize(256 + Action.Size() + caPayload.Size() + Session.Size() + Nonce.Size() + Signature.Size() + Agent.Size())
+                            .Format("SELECT * FROM daemon.signed_fetch('POST', %s, %s::json, %s, %s, %s, %s, %s, INTERVAL '%d milliseconds');",
+                                    PQQuoteLiteral(Action).c_str(),
                                     caPayload.c_str(),
                                     PQQuoteLiteral(Session).c_str(),
                                     PQQuoteLiteral(Nonce).c_str(),
@@ -386,15 +411,15 @@ namespace Apostol {
                                     ReceiveWindow
             ));
 
-            AConnection->Data().Values("method", Method);
-            AConnection->Data().Values("path", Path);
             AConnection->Data().Values("authorized", "true");
             AConnection->Data().Values("signature", "true");
 
             try {
-                ExecSQL(SQL, AConnection);
+                auto pQuery = ExecSQL(SQL, AConnection);
+                pQuery->Data().Values(_T("UniqueId"), UniqueId);
+                pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, CHTTPReply::service_unavailable, E);
+                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -466,7 +491,7 @@ namespace Apostol {
             CWSMessage wsmMessage;
 
             wsmMessage.MessageTypeId = mtCall;
-            wsmMessage.UniqueId = GetUID(42);
+            wsmMessage.UniqueId = GetUID(42).Lower();
             wsmMessage.Action = Action;
             wsmMessage.Payload << Payload;
 
@@ -478,15 +503,21 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, CHTTPReply::CStatusType Status, const std::exception &e) {
+        void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
+                CHTTPReply::CStatusType Status, const std::exception &e) {
+
+            if (AConnection->ClosedGracefully())
+                return;
+
             auto pWSReply = AConnection->WSReply();
 
-            CWSMessage wsmRequest;
             CWSMessage wsmResponse;
 
-            CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
-
             wsmResponse.MessageTypeId = mtCallError;
+
+            wsmResponse.UniqueId = UniqueId.IsEmpty() ? GetUID(42).Lower() : UniqueId;
+            wsmResponse.Action = Action.IsEmpty() ? _T("/error") : Action;
+
             wsmResponse.ErrorCode = Status;
             wsmResponse.ErrorMessage = e.what();
 
@@ -494,7 +525,7 @@ namespace Apostol {
             CWSProtocol::Response(wsmResponse, sResponse);
 
             pWSReply->SetPayload(sResponse);
-            AConnection->SendWebSocket();
+            AConnection->SendWebSocket(true);
 
             Log()->Error(APP_LOG_ERR, 0, e.what());
         }
@@ -558,20 +589,21 @@ namespace Apostol {
 
         void CWebSocketAPI::DoWebSocket(CHTTPServerConnection *AConnection) {
 
-            auto pWSRequest = AConnection->WSRequest();
+            CPQPollQuery *pQuery;
 
+            auto pWSRequest = AConnection->WSRequest();
             const CString csRequest(pWSRequest->Payload());
 
             try {
                 if (!AConnection->Connected())
                     return;
 
+                CWSMessage wsmRequest;
+                CWSMessage wsmResponse;
+
                 auto pSession = CSession::FindOfConnection(AConnection);
 
                 try {
-                    CWSMessage wsmRequest;
-                    CWSMessage wsmResponse;
-
                     CWSProtocol::Request(csRequest, wsmRequest);
 
                     if (wsmRequest.MessageTypeId == mtOpen) {
@@ -620,7 +652,7 @@ namespace Apostol {
                         }
 
                         wsmRequest.MessageTypeId = mtCall;
-                        UnauthorizedFetch(AConnection, "POST", wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
+                        UnauthorizedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
 
                         return;
                     } else if (wsmRequest.MessageTypeId == mtClose) {
@@ -641,17 +673,20 @@ namespace Apostol {
                             wsmRequest.Action = _T("/api/v1") + wsmRequest.Action;
 
                         if (caAuthorization.Schema != CAuthorization::asUnknown) {
-                            AuthorizedFetch(AConnection, caAuthorization, "POST", wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
+                            AuthorizedFetch(AConnection, caAuthorization, wsmRequest.UniqueId, wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
                         } else {
-                            if (pSession->Secret().IsEmpty())
-                                throw Delphi::Exception::Exception(_T("Secret cannot be empty."));
-                            PreSignedFetch(AConnection, "POST", wsmRequest.Action, caPayload, pSession);
+                            if (!pSession->Authorized())
+                                throw EExternal(_T("Unauthorized."));
+
+                            PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, caPayload, pSession);
                         }
                     }
                 } catch (jwt::token_expired_exception &e) {
-                    DoError(AConnection, CHTTPReply::forbidden, e);
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::forbidden, e);
+                } catch (EExternal &e) {
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e);
                 } catch (std::exception &e) {
-                    DoError(AConnection, CHTTPReply::bad_request, e);
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e);
                 }
             } catch (std::exception &e) {
                 AConnection->SendWebSocketClose();
@@ -719,11 +754,16 @@ namespace Apostol {
 
         void CWebSocketAPI::Observer(CSession *ASession, struct timeval ADate) {
 
-            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+            auto OnExecuted = [ASession](CPQPollQuery *APollQuery) {
+
+                auto pConnection = ASession->Connection();
+                if (pConnection->ClosedGracefully())
+                    return;
+
+                CHTTPReply::CStatusType status = CHTTPReply::internal_server_error;
 
                 try {
                     auto pResult = APollQuery->Results(0);
-                    auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
@@ -732,8 +772,18 @@ namespace Apostol {
                     if (pResult->nTuples() == 1) {
                         const CJSON Payload(pResult->GetValue(0, 0));
                         CString errorMessage;
-                        if (CheckError(Payload, errorMessage) != 0)
+
+                        status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
+                        if (status == CHTTPReply::unauthorized) {
+                            ASession->Session().Clear();
+                            ASession->Secret().Clear();
+                            ASession->Authorization().Clear();
+                            ASession->Authorized(false);
+                        }
+
+                        if (status != 0) {
                             throw Delphi::Exception::EDBError(errorMessage.c_str());
+                        }
                     }
 
                     if (pResult->nTuples() != 0) {
@@ -742,12 +792,12 @@ namespace Apostol {
                         DoCall(pConnection, "/observer", jsonString);
                     }
                 } catch (Delphi::Exception::Exception &E) {
-                    DoError(E);
+                    DoError(pConnection, CString(), CString(), status, E);
                 }
             };
 
-            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                DoError(E);
+            auto OnException = [ASession](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                DoError(ASession->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E);
             };
 
             if (ASession->Authorized()) {
