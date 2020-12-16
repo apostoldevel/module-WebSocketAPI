@@ -527,7 +527,7 @@ namespace Apostol {
             pWSReply->SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
-            Log()->Error(APP_LOG_ERR, 0, e.what());
+            Log()->Error(APP_LOG_ERR, 0, "%s", e.what());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -781,7 +781,7 @@ namespace Apostol {
                             ASession->Authorized(false);
                         }
 
-                        if (status != 0) {
+                        if (status != CHTTPReply::ok) {
                             throw Delphi::Exception::EDBError(errorMessage.c_str());
                         }
                     }
