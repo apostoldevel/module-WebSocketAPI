@@ -61,9 +61,9 @@ namespace Apostol {
         void CWebSocketAPI::InitMethods() {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
             m_pMethods->AddObject(_T("GET")    , (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoGet(Connection); }));
+            m_pMethods->AddObject(_T("POST")   , (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoPost(Connection); }));
             m_pMethods->AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
             m_pMethods->AddObject(_T("HEAD")   , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-            m_pMethods->AddObject(_T("POST")   , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
             m_pMethods->AddObject(_T("PUT")    , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
             m_pMethods->AddObject(_T("DELETE") , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
             m_pMethods->AddObject(_T("TRACE")  , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
@@ -71,9 +71,9 @@ namespace Apostol {
             m_pMethods->AddObject(_T("CONNECT"), (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
 #else
             m_pMethods->AddObject(_T("GET")    , (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoGet, this, _1)));
+            m_pMethods->AddObject(_T("POST")   , (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoPost, this, _1)));
             m_pMethods->AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
             m_pMethods->AddObject(_T("HEAD")   , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-            m_pMethods->AddObject(_T("POST")   , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
             m_pMethods->AddObject(_T("PUT")    , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
             m_pMethods->AddObject(_T("DELETE") , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
             m_pMethods->AddObject(_T("TRACE")  , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
@@ -162,7 +162,6 @@ namespace Apostol {
             };
 
             auto SignOut = [pSession](const CJSON &Payload) {
-                pSession->Session().Clear();
                 pSession->Secret().Clear();
                 pSession->Authorization().Clear();
                 pSession->Authorized(false);
@@ -175,7 +174,6 @@ namespace Apostol {
                 }
 
                 if (!pSession->Authorized()) {
-                    pSession->Session().Clear();
                     pSession->Secret().Clear();
                     pSession->Authorization().Clear();
 
@@ -433,7 +431,7 @@ namespace Apostol {
                         Log()->Message(_T("[%s:%d] WebSocket Session %s: Closed connection."),
                                        pConnection->Socket()->Binding()->PeerIP(),
                                        pConnection->Socket()->Binding()->PeerPort(),
-                                       pSession->Identity().IsEmpty() ? "(empty)" : pSession->Identity().c_str()
+                                       pSession->Session().c_str()
                         );
                     }
                     if (pSession->UpdateCount() == 0) {
@@ -475,6 +473,36 @@ namespace Apostol {
             }
 
             return true;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization) {
+
+            auto pRequest = AConnection->Request();
+
+            try {
+                if (CheckAuthorizationData(pRequest, Authorization)) {
+                    if (Authorization.Schema == CAuthorization::asBearer) {
+                        Authorization.Token = VerifyToken(Authorization.Token);
+                        return true;
+                    }
+                }
+
+                if (Authorization.Schema == CAuthorization::asBasic)
+                    AConnection->Data().Values("Authorization", "Basic");
+
+                ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
+            } catch (jwt::token_expired_exception &e) {
+                ReplyError(AConnection, CHTTPReply::forbidden, e.what());
+            } catch (jwt::token_verification_exception &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            } catch (CAuthorizationError &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            } catch (std::exception &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            }
+
+            return false;
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -531,6 +559,45 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CWebSocketAPI::DoPost(CHTTPServerConnection *AConnection) {
+
+            auto pRequest = AConnection->Request();
+            auto pReply = AConnection->Reply();
+
+            pReply->ContentType = CHTTPReply::json;
+
+            CStringList slRouts;
+            SplitColumns(pRequest->Location.pathname, slRouts, '/');
+
+            if (slRouts.Count() < 2) {
+                AConnection->SendStockReply(CHTTPReply::bad_request);
+                return;
+            }
+
+            CSession *pSession;
+            bool sent = false;
+
+            const auto& caSession = slRouts[1];
+            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : CString();
+
+            CAuthorization Authorization;
+            if (CheckAuthorization(AConnection, Authorization)) {
+                for (int i = 0; i < m_SessionManager.Count(); ++i) {
+                    pSession = m_SessionManager[i];
+                    if ((pSession->Session() == caSession) && (caIdentity.IsEmpty() ? true : pSession->Identity() == caIdentity) && pSession->Authorized()) {
+                        sent = true;
+                        DoCall(pSession->Connection(), "/ws", pRequest->Content);
+                    }
+                }
+            }
+
+            pReply->Content.Clear();
+            pReply->Content.Format(R"({"status": "%s"})", sent ? "Sent" : "Not sent");
+
+            AConnection->SendReply(CHTTPReply::ok, nullptr, true);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CWebSocketAPI::DoGet(CHTTPServerConnection *AConnection) {
 
             auto pRequest = AConnection->Request();
@@ -538,20 +605,22 @@ namespace Apostol {
 
             pReply->ContentType = CHTTPReply::html;
 
-            CStringList cPath;
-            SplitColumns(pRequest->Location.pathname, cPath, '/');
+            CStringList slRouts;
+            SplitColumns(pRequest->Location.pathname, slRouts, '/');
 
-            if (cPath.Count() != 2) {
+            if (slRouts.Count() < 2) {
                 AConnection->SendStockReply(CHTTPReply::bad_request);
                 return;
             }
 
-            if (cPath[0] != "session") {
+            if (slRouts[0] != "session") {
                 AConnection->SendStockReply(CHTTPReply::not_found);
                 return;
             }
 
-            const auto& caIdentity = cPath[1];
+            const auto& caSession = slRouts[1];
+            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : GetUID(40).Lower();
+
             const auto& caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
             const auto& caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
 
@@ -569,6 +638,7 @@ namespace Apostol {
 
             if (pSession == nullptr) {
                 pSession = m_SessionManager.Add(AConnection);
+                pSession->Session() = caSession;
                 pSession->Identity() = caIdentity;
             } else {
                 pSession->SwitchConnection(AConnection);
@@ -607,9 +677,6 @@ namespace Apostol {
                     CWSProtocol::Request(csRequest, wsmRequest);
 
                     if (wsmRequest.MessageTypeId == mtOpen) {
-
-                        pSession->Session() = pSession->Identity();
-
                         if (wsmRequest.Payload.HasOwnProperty("secret")) {
                             wsmRequest.Action = _T("/api/v1/authenticate");
 
@@ -637,7 +704,7 @@ namespace Apostol {
 
                             const auto& token = wsmRequest.Payload[_T("token")].AsString();
 
-                            if (pSession->Identity() != VerifyToken(token))
+                            if (pSession->Session() != VerifyToken(token))
                                 throw Delphi::Exception::Exception(_T("Token from another session."));
 
                             pSession->Secret().Clear();
@@ -649,6 +716,8 @@ namespace Apostol {
                             wsmRequest.Payload.Object().AddPair(_T("session"), pSession->Session());
                             wsmRequest.Payload.Object().AddPair(_T("agent"), pSession->Agent());
                             wsmRequest.Payload.Object().AddPair(_T("host"), pSession->IP());
+                        } else {
+                            throw Delphi::Exception::Exception(_T("Bad request."));
                         }
 
                         wsmRequest.MessageTypeId = mtCall;
@@ -663,7 +732,7 @@ namespace Apostol {
                     if (wsmRequest.MessageTypeId == mtCall) {
                         const auto& caAuthorization = pSession->Authorization();
 
-                        if (caAuthorization.Schema == CAuthorization::asBasic && caAuthorization.Username != pSession->Identity()) {
+                        if (caAuthorization.Schema == CAuthorization::asBasic && caAuthorization.Username != pSession->Session()) {
                             throw Delphi::Exception::Exception(_T("Invalid session header value."));
                         }
 
@@ -694,6 +763,12 @@ namespace Apostol {
 
                 Log()->Error(APP_LOG_EMERG, 0, e.what());
             }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
+            CApostolModule::Initialization(AProcess);
+            //Listen();
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -749,6 +824,37 @@ namespace Apostol {
             }
 
             return decoded.get_payload_claim("sub").as_string();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::Listen() {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+                try {
+                    auto pResult = APollQuery->Results(0);
+
+                    if (pResult->ExecStatus() != PGRES_COMMAND_OK) {
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                    }
+
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
+                }
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                DoError(E);
+            };
+
+            CStringList SQL;
+
+            SQL.Add("LISTEN notification;");
+
+            try {
+                ExecSQL(SQL, nullptr, OnExecuted, OnException);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -846,7 +952,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         bool CWebSocketAPI::CheckLocation(const CLocation &Location) {
-            return Location.pathname.SubString(0, 9) == _T("/session/");
+            return Location.pathname.SubString(0, 9) == _T("/session/") || Location.pathname.SubString(0, 4) == _T("/ws/");
         }
         //--------------------------------------------------------------------------------------------------------------
     }

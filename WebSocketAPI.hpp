@@ -48,6 +48,7 @@ namespace Apostol {
 
             CSessionManager m_SessionManager;
 
+            void Listen();
             void Observer(CSession *ASession, struct timeval ADate);
 
             void InitMethods() override;
@@ -70,6 +71,7 @@ namespace Apostol {
                 CHTTPReply::CStatusType Status, const std::exception &e);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
+            void DoPost(CHTTPServerConnection *AConnection);
 
             void DoWebSocket(CHTTPServerConnection *AConnection);
             void DoSessionDisconnected(CObject *Sender);
@@ -87,6 +89,8 @@ namespace Apostol {
                 return new CWebSocketAPI(AProcess);
             }
 
+            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
+
             CString VerifyToken(const CString &Token);
 
             void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
@@ -101,6 +105,8 @@ namespace Apostol {
             void SignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
                 const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
                 const CString &Agent, const CString &Host, long int ReceiveWindow = 5000);
+
+            void Initialization(CModuleProcess *AProcess) override;
 
             bool Execute(CHTTPServerConnection *AConnection) override;
 
