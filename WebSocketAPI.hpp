@@ -42,7 +42,6 @@ namespace Apostol {
 
             CSessionManager m_SessionManager;
 
-            void Listen();
             void Observer(CSession *ASession, const CString &Publisher, const CString &Data);
 
             void InitMethods() override;
@@ -84,6 +83,8 @@ namespace Apostol {
             static class CWebSocketAPI *CreateModule(CModuleProcess *AProcess) {
                 return new CWebSocketAPI(AProcess);
             }
+
+            void InitListen();
 
             bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, bool RaiseError = false);
 

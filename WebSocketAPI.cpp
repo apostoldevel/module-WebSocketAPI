@@ -190,7 +190,7 @@ namespace Apostol {
         void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
             const auto& Info = AConnection->ConnInfo();
 
-            DebugMessage("[NOTIFY] [%d] [postgresql://%s@%s:%s/%s] [PID: %d] [%s] %s",
+            DebugMessage("[NOTIFY] [%d] [postgresql://%s@%s:%s/%s] [PID: %d] [%s] %s\n",
                 AConnection->Socket(), Info["user"].c_str(), Info["host"].c_str(), Info["port"].c_str(), Info["dbname"].c_str(),
                 ANotify->be_pid, ANotify->relname, ANotify->extra);
 
@@ -591,16 +591,16 @@ namespace Apostol {
                 for (int i = 0; i < m_SessionManager.Count(); ++i) {
                     pSession = m_SessionManager[i];
                     if ((pSession->Session() == caSession) && (caIdentity.IsEmpty() ? true : pSession->Identity() == caIdentity) && pSession->Authorized()) {
-                        sent = true;
                         DoCall(pSession->Connection(), "/ws", pRequest->Content);
+                        sent = true;
                     }
                 }
+
+                pReply->Content.Clear();
+                pReply->Content.Format(R"({"status": "%s"})", sent ? "Sent" : "Not sent");
+
+                AConnection->SendReply(CHTTPReply::ok, nullptr, true);
             }
-
-            pReply->Content.Clear();
-            pReply->Content.Format(R"({"status": "%s"})", sent ? "Sent" : "Not sent");
-
-            AConnection->SendReply(CHTTPReply::ok, nullptr, true);
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -778,7 +778,7 @@ namespace Apostol {
 
         void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
             CApostolModule::Initialization(AProcess);
-            Listen();
+            InitListen();
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -837,13 +837,13 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::Listen() {
+        void CWebSocketAPI::InitListen() {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
                 try {
                     auto pResult = APollQuery->Results(0);
 
-                    if (pResult->ExecStatus() != PGRES_COMMAND_OK) {
+                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
                     }
 
@@ -864,7 +864,7 @@ namespace Apostol {
 
             CStringList SQL;
 
-            SQL.Add("LISTEN notify;");
+            SQL.Add("SELECT daemon.init_listen();");
 
             try {
                 ExecSQL(SQL, nullptr, OnExecuted, OnException);
