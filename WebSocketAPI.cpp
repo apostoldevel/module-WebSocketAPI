@@ -42,17 +42,10 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "web socket api"),
-            m_ObserverDate{0, 0} {
-
+        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "web socket api") {
             m_Headers.Add("Authorization");
             m_Headers.Add("Session");
             m_Headers.Add("Secret");
-
-            m_CheckDate = Now();
-            gettimeofday(&m_ObserverDate, nullptr);
-
-            m_HeartbeatInterval = 1000;
 
             CWebSocketAPI::InitMethods();
         }
@@ -62,7 +55,7 @@ namespace Apostol {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
             m_pMethods->AddObject(_T("GET")    , (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoGet(Connection); }));
             m_pMethods->AddObject(_T("POST")   , (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoPost(Connection); }));
-            m_pMethods->AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
+            m_pMethods->AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoOptions(Connection); }));
             m_pMethods->AddObject(_T("HEAD")   , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
             m_pMethods->AddObject(_T("PUT")    , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
             m_pMethods->AddObject(_T("DELETE") , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
@@ -72,7 +65,7 @@ namespace Apostol {
 #else
             m_pMethods->AddObject(_T("GET")    , (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoGet, this, _1)));
             m_pMethods->AddObject(_T("POST")   , (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoPost, this, _1)));
-            m_pMethods->AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
+            m_pMethods->AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoOptions, this, _1)));
             m_pMethods->AddObject(_T("HEAD")   , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
             m_pMethods->AddObject(_T("PUT")    , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
             m_pMethods->AddObject(_T("DELETE") , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
@@ -191,6 +184,18 @@ namespace Apostol {
             } else if (Path == _T("/api/v1/authorize")) {
                 Authorize(Payload);
             }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
+            const auto& Info = AConnection->ConnInfo();
+
+            DebugMessage("[NOTIFY] [%d] [postgresql://%s@%s:%s/%s] [PID: %d] [%s] %s",
+                AConnection->Socket(), Info["user"].c_str(), Info["host"].c_str(), Info["port"].c_str(), Info["dbname"].c_str(),
+                ANotify->be_pid, ANotify->relname, ANotify->extra);
+
+            for (int i = 0; i < m_SessionManager.Count(); ++i)
+                Observer(m_SessionManager[i], ANotify->relname, ANotify->extra);
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -476,7 +481,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization) {
+        bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, bool RaiseError) {
 
             auto pRequest = AConnection->Request();
 
@@ -484,12 +489,15 @@ namespace Apostol {
                 if (CheckAuthorizationData(pRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
                         Authorization.Token = VerifyToken(Authorization.Token);
+                        Authorization.TokenType = CAuthorization::attAccess;
                         return true;
                     }
                 }
 
-                if (Authorization.Schema == CAuthorization::asBasic)
-                    AConnection->Data().Values("Authorization", "Basic");
+                if (!RaiseError)
+                    return Authorization.Schema == CAuthorization::asBasic;
+
+                AConnection->Data().Values("Authorization", "Basic");
 
                 ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
             } catch (jwt::token_expired_exception &e) {
@@ -507,8 +515,6 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoError(const Delphi::Exception::Exception &E) {
-            const auto now = Now();
-            m_CheckDate = now + (CDateTime) m_HeartbeatInterval * 10 / MSecsPerDay;
             Log()->Error(APP_LOG_EMERG, 0, E.what());
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -632,8 +638,6 @@ namespace Apostol {
             const CString csAccept(SHA1(caSecWebSocketKey + _T("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
             const CString csProtocol(caSecWebSocketProtocol.IsEmpty() ? "" : caSecWebSocketProtocol.SubString(0, caSecWebSocketProtocol.Find(',')));
 
-            AConnection->SwitchingProtocols(csAccept, csProtocol);
-
             auto pSession = m_SessionManager.FindByIdentity(caIdentity);
 
             if (pSession == nullptr) {
@@ -644,10 +648,16 @@ namespace Apostol {
                 pSession->SwitchConnection(AConnection);
             }
 
+            if (CheckAuthorization(AConnection, pSession->Authorization(), false)) {
+                if (pSession->Session() != pSession->Authorization().Token)
+                    throw Delphi::Exception::Exception(_T("Token for another session."));
+                pSession->Authorized(true);
+            }
+
             pSession->IP() = GetHost(AConnection);
             pSession->Agent() = GetUserAgent(AConnection);
 
-            CheckAuthorizationData(pRequest, pSession->Authorization());
+            AConnection->SwitchingProtocols(csAccept, csProtocol);
 
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
             AConnection->OnDisconnected([this](auto && Sender) { DoSessionDisconnected(Sender); });
@@ -705,7 +715,7 @@ namespace Apostol {
                             const auto& token = wsmRequest.Payload[_T("token")].AsString();
 
                             if (pSession->Session() != VerifyToken(token))
-                                throw Delphi::Exception::Exception(_T("Token from another session."));
+                                throw Delphi::Exception::Exception(_T("Token for another session."));
 
                             pSession->Secret().Clear();
                             pSession->Authorization() << "Bearer " + token;
@@ -768,7 +778,7 @@ namespace Apostol {
 
         void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
             CApostolModule::Initialization(AProcess);
-            //Listen();
+            Listen();
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -837,6 +847,12 @@ namespace Apostol {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
                     }
 
+                    APollQuery->Connection()->Listener(true);
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+                    APollQuery->Connection()->OnNotify([this](auto && APollQuery, auto && ANotify) { DoPostgresNotify(APollQuery, ANotify); });
+#else
+                    APollQuery->Connection()->OnNotify(std::bind(&CWebSocketAPI::DoPostgresNotify, this, _1, _2));
+#endif
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
                 }
@@ -848,7 +864,7 @@ namespace Apostol {
 
             CStringList SQL;
 
-            SQL.Add("LISTEN notification;");
+            SQL.Add("LISTEN notify;");
 
             try {
                 ExecSQL(SQL, nullptr, OnExecuted, OnException);
@@ -858,7 +874,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::Observer(CSession *ASession, struct timeval ADate) {
+        void CWebSocketAPI::Observer(CSession *ASession, const CString &Publisher, const CString &Data) {
 
             auto OnExecuted = [ASession](CPQPollQuery *APollQuery) {
 
@@ -893,9 +909,10 @@ namespace Apostol {
                     }
 
                     if (pResult->nTuples() != 0) {
+                        const auto& publisher = APollQuery->Data()["publisher"];
                         CString jsonString;
-                        PQResultToJson(pResult, jsonString, true);
-                        DoCall(pConnection, "/observer", jsonString);
+                        PQResultToJson(pResult, jsonString);
+                        DoCall(pConnection, "/" + publisher, jsonString);
                     }
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(pConnection, CString(), CString(), status, E);
@@ -910,15 +927,17 @@ namespace Apostol {
 
                 CStringList SQL;
 
-                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', %d.%d, %s, %s);",
+                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', '%s', '%s'::jsonb, %s, %s);",
+                                         Publisher.c_str(),
                                          ASession->Session().c_str(),
-                                         ADate.tv_sec, ADate.tv_usec,
+                                         Data.c_str(),
                                          PQQuoteLiteral(ASession->Agent()).c_str(),
                                          PQQuoteLiteral(ASession->IP()).c_str()
                 ));
 
                 try {
-                    ExecSQL(SQL, ASession->Connection(), OnExecuted, OnException);
+                    auto pQuery = ExecSQL(SQL, ASession->Connection(), OnExecuted, OnException);
+                    pQuery->Data().Values(_T("publisher"), Publisher);
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
                 }
@@ -927,19 +946,6 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::Heartbeat() {
-            auto now = Now();
-
-            if (now >= m_CheckDate) {
-                struct timeval tv = {0, 0};
-                gettimeofday(&tv, nullptr);
-
-                for (int i = 0; i < m_SessionManager.Count(); ++i)
-                    Observer(m_SessionManager[i], m_ObserverDate);
-
-                m_ObserverDate = tv;
-                m_CheckDate = now + (CDateTime) m_HeartbeatInterval / MSecsPerDay;
-            }
-
             CApostolModule::Heartbeat();
         }
         //--------------------------------------------------------------------------------------------------------------

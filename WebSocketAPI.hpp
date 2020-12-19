@@ -40,16 +40,10 @@ namespace Apostol {
         class CWebSocketAPI: public CApostolModule {
         private:
 
-            int m_HeartbeatInterval;
-
-            struct timeval m_ObserverDate;
-
-            CDateTime m_CheckDate;
-
             CSessionManager m_SessionManager;
 
             void Listen();
-            void Observer(CSession *ASession, struct timeval ADate);
+            void Observer(CSession *ASession, const CString &Publisher, const CString &Data);
 
             void InitMethods() override;
 
@@ -76,6 +70,8 @@ namespace Apostol {
             void DoWebSocket(CHTTPServerConnection *AConnection);
             void DoSessionDisconnected(CObject *Sender);
 
+            void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
+
             void DoPostgresQueryExecuted(CPQPollQuery *APollQuery) override;
             void DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) override;
 
@@ -89,7 +85,7 @@ namespace Apostol {
                 return new CWebSocketAPI(AProcess);
             }
 
-            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
+            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, bool RaiseError = false);
 
             CString VerifyToken(const CString &Token);
 

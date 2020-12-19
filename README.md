@@ -142,9 +142,9 @@ POST /ws/<code>[/<identity>]
 ```
 
 * Где:
-  `<code>` - **Обязательный**. Код сессии WebSocket соединения на которое необходимо передать данные;
-  `<identity>` - **Необязательный**. Идентификатор сенса связи в рамках сессии (при наличии);
-  `<anydata>` - **Необязательный**. Любые данные в произвольном формате.
+  - `<code>` - **Обязательный**. Код сессии WebSocket соединения на которое необходимо передать данные;
+  - `<identity>` - **Необязательный**. Идентификатор сенса связи в рамках сессии (при наличии);
+  - `<anydata>` - **Необязательный**. Любые данные в произвольном формате.
 
 Данные будут отправлены запросом с типом сообщения `CALL` в `Action` будет указано значение `/ws` в `Payload` будут произвольные данные из REST API запроса.
 
@@ -179,7 +179,7 @@ POST /api/v1/observer/subscribe
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-code | STRING | notify, log, geo | **Обязательный**. Код издателя.
+publisher | STRING | notify, log, geo | **Обязательный**. Код издателя.
 filter | JSON |  | **Необязательный**. Фильтр отбора событий издателя.
 params | JSON |  | **Необязательный**. Параметры слушателя.
 
@@ -187,12 +187,12 @@ params | JSON |  | **Необязательный**. Параметры слуш
 
 Подписаться на все события издателя с кодом `notify`.
 ````json
-{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"code":"notify"}}
+{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify"}}
 ````
 
 Подписаться на события издателя с кодом `notify` с учётом фильтра: 
 ````json
-{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"code":"notify","filter":{"classes":["client", "device"]},"params":{"type":"object"}}}
+{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"classes":["client", "device"]},"params":{"type":"object"}}}
 ````
   Где фильтр: 
     - Классы (`classes`): client, device
@@ -202,12 +202,12 @@ params | JSON |  | **Необязательный**. Параметры слуш
 
 Подписаться на все входящие сообщения:
 ````json
-{"t":2,"u":"observer","a":"/observer/subscribe","p":{"code":"notify", "filter": {"entities": ["message"], "classes": ["inbox"], "actions": ["create"]}, "params": {"type": "object"}}}
+{"t":2,"u":"observer","a":"/observer/subscribe","p":{"publisher":"notify", "filter": {"entities": ["message"], "classes": ["inbox"], "actions": ["create"]}, "params": {"type": "object"}}}
 ````
 
 Отловить создание нового клиента и получить данные в виде списка клиентов:
 ````json
-{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"code":"notify","filter":{"classes":["client"],"actions":["create"]},"params":{"type":"hook","hook":{"path": "/api/v1/client/list", "payload": {}}}}}
+{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"classes":["client"],"actions":["create"]},"params":{"type":"hook","hook":{"path": "/api/v1/client/list", "payload": {}}}}}
 ````
 
 #### Отписаться
@@ -221,11 +221,11 @@ POST /api/v1/observer/unsubscribe
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-code | STRING | notify | **Обязательный**. Код издателя.
+publisher | STRING | notify, log, geo | **Обязательный**. Код издателя.
 
 Пример запроса:
 ````json
-{"t":2,"u":"<uuid>","a":"/observer/unsubscribe","p":{"code":"notify"}}
+{"t":2,"u":"<uuid>","a":"/observer/unsubscribe","p":{"publisher":"notify"}}
 ````
 
 ## Издатель (`publisher`)
@@ -303,13 +303,13 @@ payload  | JSON | Hook | **Вариативный**. Полезная нагру
 ```http request
 POST /api/v1/observer/publisher
 ```
-Получить данные издателя по коду.
+Получить данные издателя.
 
 **Параметры запроса:**
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-code | STRING | notify | **Обязательный**. Код издателя.
+code | STRING | notify, log, geo | **Обязательный**. Код издателя.
 fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
 
 ### Данные издателя
@@ -317,13 +317,13 @@ fields | JSON array |  | **Необязательный**. Массив JSON str
 ```http request
 POST /api/v1/observer/publisher/get
 ```
-Получить данные издателя по идентификатору.
+Получить данные издателя.
 
 **Параметры запроса:**
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-id | NUMERIC |  | **Обязательный**. Идентификатор издателя.
+code | STRING | notify, log, geo | **Обязательный**. Код издателя.
 fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
 
 ### Количество издателей
@@ -356,7 +356,7 @@ POST /api/v1/observer/listener
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-code | STRING | notify | **Обязательный**. Код издателя.
+publisher | STRING | notify | **Обязательный**. Код издателя.
 session | STRING |  | **Необязательный**. Код сессии.
 fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
 
@@ -371,7 +371,7 @@ POST /api/v1/observer/listener/set
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-publisher | NUMERIC |  | **Обязательный**. Идентификатор издателя.
+publisher | STRING |  | **Обязательный**. Идентификатор издателя.
 session | STRING |  | **Необязательный**. Код сессии.
 filter | JSON |  | **Необязательный**. Фильтр отбора событий издателя.
 params | JSON |  | **Необязательный**. Параметры слушателя.
@@ -387,7 +387,7 @@ POST /api/v1/observer/listener/get
 
 Поле | Тип | Значение | Описание
 ------------ | ------------ | ------------ |------------
-publisher | NUMERIC |  | **Обязательный**. Идентификатор издателя.
+publisher | STRING |  | **Обязательный**. Код издателя.
 session | STRING |  | **Необязательный**. Код сессии.
 fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
 
