@@ -152,12 +152,22 @@ POST /ws/<code>[/<identity>]
 ````http request
 POST /ws/8c98085f34c83a0eea5f40791218fbf80f1858d3 HTTP/1.1
 Host: localhost:8080
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiIDogImFjY291bnRzLnBsdWdtZS5ydSIsICJhdWQiIDogIndlYi1wbHVnbWUucnUiLCAic3ViIiA6ICI4Yzk4MDg1ZjM0YzgzYTBlZWE1ZjQwNzkxMjE4ZmJmODBmMTg1OGQzIiwgImlhdCIgOiAxNjA4MzI1OTUzLCAiZXhwIiA6IDE2MDgzMjk1NTN9.9GI82ffkIhbUeWR8if3a8q78nfXAL4AFOMp3kWDTHOA
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.[...].9GI82ffkIhbUeWR8if3a8q78nfXAL4AFOMp3kWDTHOA
 Content-Type: application/json
 
 {"anydata":null}
 ````
-  
+
+Положительный ответ:
+````json
+{"sent": true, "status": "Success"}
+````
+
+Отрицательный ответ:
+````json
+{"sent": false, "status": "Session not found"}
+````
+
 ## Подписка на события
 
 * Для того чтобы получать данные от сервера без предварительных запросов со стороны клиентского приложения нужно подписаться на события.

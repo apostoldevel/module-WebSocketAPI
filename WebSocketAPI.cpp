@@ -47,6 +47,10 @@ namespace Apostol {
             m_Headers.Add("Session");
             m_Headers.Add("Secret");
 
+            m_CheckDate = Now();
+
+            m_HeartbeatInterval = 60;
+
             CWebSocketAPI::InitMethods();
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -481,23 +485,22 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, bool RaiseError) {
+        bool CWebSocketAPI::CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session,
+                CAuthorization &Authorization) {
 
             auto pRequest = AConnection->Request();
 
             try {
                 if (CheckAuthorizationData(pRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
-                        Authorization.Token = VerifyToken(Authorization.Token);
-                        Authorization.TokenType = CAuthorization::attAccess;
+                        if (Session != VerifyToken(Authorization.Token))
+                            throw Delphi::Exception::Exception(_T("Token for another session."));
                         return true;
                     }
                 }
 
-                if (!RaiseError)
-                    return Authorization.Schema == CAuthorization::asBasic;
-
-                AConnection->Data().Values("Authorization", "Basic");
+                if (Authorization.Schema == CAuthorization::asBasic)
+                    AConnection->Data().Values("Authorization", "Basic");
 
                 ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
             } catch (jwt::token_expired_exception &e) {
@@ -511,6 +514,38 @@ namespace Apostol {
             }
 
             return false;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        int CWebSocketAPI::CheckSessionAuthorization(CSession *ASession) {
+
+            auto pConnection = ASession->Connection();
+            auto pRequest = pConnection->Request();
+            auto &Authorization = ASession->Authorization();
+
+            try {
+                if (CheckAuthorizationData(pRequest, Authorization)) {
+                    if (Authorization.Schema == CAuthorization::asBearer) {
+                        if (ASession->Session() != VerifyToken(Authorization.Token))
+                            throw Delphi::Exception::Exception(_T("Token for another session."));
+                    } else {
+                        if (ASession->Session() != Authorization.Username)
+                            throw Delphi::Exception::Exception(_T("Invalid session header value."));
+                    }
+                    return 1;
+                }
+                return -1;
+            } catch (jwt::token_expired_exception &e) {
+                ReplyError(pConnection, CHTTPReply::forbidden, e.what());
+            } catch (jwt::token_verification_exception &e) {
+                ReplyError(pConnection, CHTTPReply::bad_request, e.what());
+            } catch (CAuthorizationError &e) {
+                ReplyError(pConnection, CHTTPReply::bad_request, e.what());
+            } catch (std::exception &e) {
+                ReplyError(pConnection, CHTTPReply::bad_request, e.what());
+            }
+
+            return 0;
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -581,23 +616,27 @@ namespace Apostol {
             }
 
             CSession *pSession;
-            bool sent = false;
+            bool bSent = false;
 
             const auto& caSession = slRouts[1];
             const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : CString();
 
             CAuthorization Authorization;
-            if (CheckAuthorization(AConnection, Authorization)) {
+            if (CheckTokenAuthorization(AConnection, caSession, Authorization)) {
                 for (int i = 0; i < m_SessionManager.Count(); ++i) {
                     pSession = m_SessionManager[i];
                     if ((pSession->Session() == caSession) && (caIdentity.IsEmpty() ? true : pSession->Identity() == caIdentity) && pSession->Authorized()) {
                         DoCall(pSession->Connection(), "/ws", pRequest->Content);
-                        sent = true;
+                        bSent = true;
                     }
                 }
 
                 pReply->Content.Clear();
-                pReply->Content.Format(R"({"status": "%s"})", sent ? "Sent" : "Not sent");
+
+                if (bSent)
+                    pReply->Content = R"({"sent": true, "status": "Success"})";
+                else
+                    pReply->Content = R"({"sent": false, "status": "Session not found"})";
 
                 AConnection->SendReply(CHTTPReply::ok, nullptr, true);
             }
@@ -619,7 +658,7 @@ namespace Apostol {
                 return;
             }
 
-            if (slRouts[0] != "session") {
+            if (slRouts[0] != _T("session")) {
                 AConnection->SendStockReply(CHTTPReply::not_found);
                 return;
             }
@@ -648,22 +687,24 @@ namespace Apostol {
                 pSession->SwitchConnection(AConnection);
             }
 
-            if (CheckAuthorization(AConnection, pSession->Authorization(), false)) {
-                if (pSession->Session() != pSession->Authorization().Token)
-                    throw Delphi::Exception::Exception(_T("Token for another session."));
-                pSession->Authorized(true);
-            }
-
             pSession->IP() = GetHost(AConnection);
             pSession->Agent() = GetUserAgent(AConnection);
-
-            AConnection->SwitchingProtocols(csAccept, csProtocol);
 
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
             AConnection->OnDisconnected([this](auto && Sender) { DoSessionDisconnected(Sender); });
 #else
             AConnection->OnDisconnected(std::bind(&CWebSocketAPI::DoSessionDisconnected, this, _1));
 #endif
+
+            const auto checkAuth = CheckSessionAuthorization(pSession);
+            if (checkAuth == 1) {
+                pSession->Authorized(true);
+            } else if (checkAuth == 0) {
+                AConnection->Disconnect();
+                return;
+            }
+
+            AConnection->SwitchingProtocols(csAccept, csProtocol);
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -687,7 +728,7 @@ namespace Apostol {
                     CWSProtocol::Request(csRequest, wsmRequest);
 
                     if (wsmRequest.MessageTypeId == mtOpen) {
-                        if (wsmRequest.Payload.HasOwnProperty("secret")) {
+                        if (wsmRequest.Payload.HasOwnProperty(_T("secret"))) {
                             wsmRequest.Action = _T("/api/v1/authenticate");
 
                             const auto &session = wsmRequest.Payload[_T("session")].AsString();
@@ -709,7 +750,7 @@ namespace Apostol {
                             wsmRequest.Payload.Object().AddPair(_T("agent"), pSession->Agent());
                             wsmRequest.Payload.Object().AddPair(_T("host"), pSession->IP());
 
-                        } else if (wsmRequest.Payload.HasOwnProperty("token")) {
+                        } else if (wsmRequest.Payload.HasOwnProperty(_T("token"))) {
                             wsmRequest.Action = _T("/api/v1/authorize");
 
                             const auto& token = wsmRequest.Payload[_T("token")].AsString();
@@ -718,7 +759,7 @@ namespace Apostol {
                                 throw Delphi::Exception::Exception(_T("Token for another session."));
 
                             pSession->Secret().Clear();
-                            pSession->Authorization() << "Bearer " + token;
+                            pSession->Authorization() << _T("Bearer ") + token;
                             pSession->Authorization().TokenType = CAuthorization::attAccess;
                             pSession->Authorized(false);
 
@@ -746,23 +787,21 @@ namespace Apostol {
                             throw Delphi::Exception::Exception(_T("Invalid session header value."));
                         }
 
-                        const auto& caPayload = wsmRequest.Payload.ToString();
+                        if (!pSession->Authorized())
+                            throw CAuthorizationError(_T("Unauthorized."));
 
                         if (wsmRequest.Action.SubString(0, 8) != _T("/api/v1/"))
                             wsmRequest.Action = _T("/api/v1") + wsmRequest.Action;
 
                         if (caAuthorization.Schema != CAuthorization::asUnknown) {
-                            AuthorizedFetch(AConnection, caAuthorization, wsmRequest.UniqueId, wsmRequest.Action, caPayload, pSession->Agent(), pSession->IP());
+                            AuthorizedFetch(AConnection, caAuthorization, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
                         } else {
-                            if (!pSession->Authorized())
-                                throw EExternal(_T("Unauthorized."));
-
-                            PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, caPayload, pSession);
+                            PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession);
                         }
                     }
                 } catch (jwt::token_expired_exception &e) {
                     DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::forbidden, e);
-                } catch (EExternal &e) {
+                } catch (CAuthorizationError &e) {
                     DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e);
                 } catch (std::exception &e) {
                     DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e);
@@ -778,7 +817,7 @@ namespace Apostol {
 
         void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
             CApostolModule::Initialization(AProcess);
-            InitListen();
+            //InitListen();
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -947,6 +986,18 @@ namespace Apostol {
 
         void CWebSocketAPI::Heartbeat() {
             CApostolModule::Heartbeat();
+
+            const auto now = Now();
+
+            if ((now >= m_CheckDate)) {
+                m_CheckDate = now + (CDateTime) m_HeartbeatInterval / SecsPerDay;
+
+                int Index = 0;
+                while (Index < PQServer().PollManager()->Count() && !PQServer().Connections(Index++)->Listener());
+
+                if (Index == PQServer().PollManager()->Count())
+                    InitListen();
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 

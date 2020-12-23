@@ -40,6 +40,10 @@ namespace Apostol {
         class CWebSocketAPI: public CApostolModule {
         private:
 
+            CDateTime m_CheckDate;
+
+            int m_HeartbeatInterval;
+
             CSessionManager m_SessionManager;
 
             void Observer(CSession *ASession, const CString &Publisher, const CString &Data);
@@ -57,7 +61,7 @@ namespace Apostol {
 
         protected:
 
-            void DoError(const Delphi::Exception::Exception &E);
+            static void DoError(const Delphi::Exception::Exception &E);
 
             static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
             static void DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
@@ -86,7 +90,8 @@ namespace Apostol {
 
             void InitListen();
 
-            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, bool RaiseError = false);
+            bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);
+            int CheckSessionAuthorization(CSession *ASession);
 
             CString VerifyToken(const CString &Token);
 
