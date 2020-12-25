@@ -440,7 +440,7 @@ namespace Apostol {
                         Log()->Message(_T("[%s:%d] WebSocket Session %s: Closed connection."),
                                        pConnection->Socket()->Binding()->PeerIP(),
                                        pConnection->Socket()->Binding()->PeerPort(),
-                                       pSession->Session().c_str()
+                                       pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
                         );
                     }
                     if (pSession->UpdateCount() == 0) {
@@ -897,7 +897,7 @@ namespace Apostol {
                 }
             };
 
-            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
                 DoError(E);
             };
 
@@ -966,10 +966,10 @@ namespace Apostol {
 
                 CStringList SQL;
 
-                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', '%s', '%s'::jsonb, %s, %s);",
+                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', '%s', %s::jsonb, %s, %s);",
                                          Publisher.c_str(),
                                          ASession->Session().c_str(),
-                                         Data.c_str(),
+                                         PQQuoteLiteral(Data).c_str(),
                                          PQQuoteLiteral(ASession->Agent()).c_str(),
                                          PQQuoteLiteral(ASession->IP()).c_str()
                 ));
@@ -993,7 +993,8 @@ namespace Apostol {
                 m_CheckDate = now + (CDateTime) m_HeartbeatInterval / SecsPerDay;
 
                 int Index = 0;
-                while (Index < PQServer().PollManager()->Count() && !PQServer().Connections(Index++)->Listener());
+                while (Index < PQServer().PollManager()->Count() && !PQServer().Connections(Index)->Listener())
+                    Index++;
 
                 if (Index == PQServer().PollManager()->Count())
                     InitListen();
