@@ -248,7 +248,7 @@ namespace Apostol {
                     wsmResponse.ErrorCode = status;
                     wsmResponse.ErrorMessage = E.what();
 
-                    Log()->Error(APP_LOG_ERR, 0, E.what());
+                    Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] Error: %s", E.what());
                 }
 
                 CString sResponse;
@@ -288,7 +288,7 @@ namespace Apostol {
                 pConnection->SendWebSocket(true);
             }
 
-            Log()->Error(APP_LOG_EMERG, 0, E.what());
+            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] Query exception: %s", E.what());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -437,7 +437,7 @@ namespace Apostol {
                 auto pSession = m_SessionManager.FindByConnection(pConnection);
                 if (pSession != nullptr) {
                     if (!pConnection->ClosedGracefully()) {
-                        Log()->Message(_T("[%s:%d] WebSocket Session %s: Closed connection."),
+                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Session %s: Closed connection."),
                                        pConnection->Socket()->Binding()->PeerIP(),
                                        pConnection->Socket()->Binding()->PeerPort(),
                                        pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
@@ -448,7 +448,7 @@ namespace Apostol {
                     }
                 } else {
                     if (!pConnection->ClosedGracefully()) {
-                        Log()->Message(_T("[%s:%d] Unknown WebSocket Session: Closed connection."),
+                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Unknown session: Closed connection."),
                                        pConnection->Socket()->Binding()->PeerIP(),
                                        pConnection->Socket()->Binding()->PeerPort()
                         );
@@ -550,7 +550,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoError(const Delphi::Exception::Exception &E) {
-            Log()->Error(APP_LOG_EMERG, 0, E.what());
+            Log()->Error(APP_LOG_EMERG, 0, "[WebSocketAPI] Error: %s", E.what());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -596,7 +596,7 @@ namespace Apostol {
             pWSReply->SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
-            Log()->Error(APP_LOG_ERR, 0, "%s", e.what());
+            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] %s", e.what());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -810,7 +810,7 @@ namespace Apostol {
                 AConnection->SendWebSocketClose();
                 AConnection->CloseConnection(true);
 
-                Log()->Error(APP_LOG_EMERG, 0, e.what());
+                Log()->Error(APP_LOG_EMERG, 0, "[WebSocketAPI] %s", e.what());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
