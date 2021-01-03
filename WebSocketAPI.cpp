@@ -434,6 +434,12 @@ namespace Apostol {
         void CWebSocketAPI::DoSessionDisconnected(CObject *Sender) {
             auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
             if (pConnection != nullptr) {
+
+                auto pPollQuery = PQServer().FindQueryByConnection(pConnection);
+                if (pPollQuery != nullptr) {
+                    pPollQuery->PollConnection(nullptr);
+                }
+
                 auto pSession = m_SessionManager.FindByConnection(pConnection);
                 if (pSession != nullptr) {
                     if (!pConnection->ClosedGracefully()) {
@@ -443,6 +449,7 @@ namespace Apostol {
                                        pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
                         );
                     }
+
                     if (pSession->UpdateCount() == 0) {
                         delete pSession;
                     }
