@@ -69,6 +69,7 @@ namespace Apostol {
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
+            void DoWS(CHTTPServerConnection *AConnection, const CString &Action);
 
             void DoWebSocket(CHTTPServerConnection *AConnection);
             void DoSessionDisconnected(CObject *Sender);

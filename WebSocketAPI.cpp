@@ -571,11 +571,13 @@ namespace Apostol {
             wsmMessage.Action = Action;
             wsmMessage.Payload << Payload;
 
-            CString sMessage;
-            CWSProtocol::Response(wsmMessage, sMessage);
+            CString sResponse;
+            CWSProtocol::Response(wsmMessage, sResponse);
 
-            pWSReply->SetPayload(sMessage);
+            pWSReply->SetPayload(sResponse);
             AConnection->SendWebSocket(true);
+
+            Log()->Message("[WebSocketAPI] [CALL] [%s] [%s] %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), Payload.c_str());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -587,23 +589,66 @@ namespace Apostol {
 
             auto pWSReply = AConnection->WSReply();
 
-            CWSMessage wsmResponse;
+            CWSMessage wsmMessage;
 
-            wsmResponse.MessageTypeId = mtCallError;
+            wsmMessage.MessageTypeId = mtCallError;
 
-            wsmResponse.UniqueId = UniqueId.IsEmpty() ? GetUID(42).Lower() : UniqueId;
-            wsmResponse.Action = Action.IsEmpty() ? _T("/error") : Action;
+            wsmMessage.UniqueId = UniqueId.IsEmpty() ? GetUID(42).Lower() : UniqueId;
+            wsmMessage.Action = Action.IsEmpty() ? _T("/error") : Action;
 
-            wsmResponse.ErrorCode = Status;
-            wsmResponse.ErrorMessage = e.what();
+            wsmMessage.ErrorCode = Status;
+            wsmMessage.ErrorMessage = e.what();
 
             CString sResponse;
-            CWSProtocol::Response(wsmResponse, sResponse);
+            CWSProtocol::Response(wsmMessage, sResponse);
 
             pWSReply->SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
-            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] %s", e.what());
+            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [ERROR] [%s] [%s] [%d] %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, e.what());
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoWS(CHTTPServerConnection *AConnection, const CString &Action) {
+
+            auto pReply = AConnection->Reply();
+
+            try {
+                if (Action == "list") {
+                    CJSONValue jsonArray(jvtArray);
+
+                    for (int i = 0; i < m_SessionManager.Count(); i++) {
+                        CJSONValue jsonSession(jvtObject);
+                        CJSONValue jsonConnection(jvtObject);
+
+                        auto pSession = m_SessionManager[i];
+
+                        jsonSession.Object().AddPair("session", pSession->Session());
+                        jsonSession.Object().AddPair("identity", pSession->Identity());
+                        jsonSession.Object().AddPair("authorized", pSession->Authorized());
+
+                        if (pSession->Connection()->Connected()) {
+                            jsonConnection.Object().AddPair("socket", pSession->Connection()->Socket()->Binding()->Handle());
+                            jsonConnection.Object().AddPair("host", pSession->Connection()->Socket()->Binding()->PeerIP());
+                            jsonConnection.Object().AddPair("port", pSession->Connection()->Socket()->Binding()->PeerPort());
+
+                            jsonSession.Object().AddPair("connection", jsonConnection);
+                        } else {
+                            jsonSession.Object().AddPair("connection", CJSONValue());
+                        }
+
+                        jsonArray.Array().Add(jsonSession);
+                    }
+
+                    pReply->Content = jsonArray.ToString();
+
+                    AConnection->SendReply(CHTTPReply::ok);
+                } else {
+                    AConnection->SendStockReply(CHTTPReply::not_found);
+                }
+            } catch (std::exception &e) {
+                ReplyError(AConnection, CHTTPReply::internal_server_error, e.what());
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -662,6 +707,11 @@ namespace Apostol {
 
             if (slRouts.Count() < 2) {
                 AConnection->SendStockReply(CHTTPReply::bad_request);
+                return;
+            }
+
+            if (slRouts[0] == "ws") {
+                DoWS(AConnection, slRouts[1]);
                 return;
             }
 
@@ -824,7 +874,6 @@ namespace Apostol {
 
         void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
             CApostolModule::Initialization(AProcess);
-            //InitListen();
         }
         //--------------------------------------------------------------------------------------------------------------
 
