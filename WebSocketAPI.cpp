@@ -613,6 +613,8 @@ namespace Apostol {
 
             auto pReply = AConnection->Reply();
 
+            pReply->ContentType = CHTTPReply::json;
+
             try {
                 if (Action == "list") {
                     CJSONValue jsonArray(jvtArray);
