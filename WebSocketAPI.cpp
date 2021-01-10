@@ -214,7 +214,7 @@ namespace Apostol {
 
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
 
-            if (pConnection != nullptr && pConnection->Connected()) {
+            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
 
                 auto pWSReply = pConnection->WSReply();
 
@@ -264,7 +264,7 @@ namespace Apostol {
 
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
 
-            if (pConnection != nullptr && pConnection->Connected()) {
+            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
                 auto pWSRequest = pConnection->WSRequest();
                 auto pWSReply = pConnection->WSReply();
 
@@ -629,7 +629,7 @@ namespace Apostol {
                         jsonSession.Object().AddPair("identity", pSession->Identity());
                         jsonSession.Object().AddPair("authorized", pSession->Authorized());
 
-                        if (pSession->Connection()->Connected()) {
+                        if (pSession->Connection() != nullptr && !pSession->Connection()->ClosedGracefully()) {
                             jsonConnection.Object().AddPair("socket", pSession->Connection()->Socket()->Binding()->Handle());
                             jsonConnection.Object().AddPair("host", pSession->Connection()->Socket()->Binding()->PeerIP());
                             jsonConnection.Object().AddPair("port", pSession->Connection()->Socket()->Binding()->PeerPort());
