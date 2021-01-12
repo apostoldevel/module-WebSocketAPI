@@ -557,7 +557,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoError(const Delphi::Exception::Exception &E) {
-            Log()->Error(APP_LOG_EMERG, 0, "[WebSocketAPI] Error: %s", E.what());
+            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] Error: %s", E.what());
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -869,7 +869,7 @@ namespace Apostol {
                 AConnection->SendWebSocketClose();
                 AConnection->CloseConnection(true);
 
-                Log()->Error(APP_LOG_EMERG, 0, "[WebSocketAPI] %s", e.what());
+                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] %s", e.what());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
