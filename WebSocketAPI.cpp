@@ -214,7 +214,7 @@ namespace Apostol {
 
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
 
-            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
+            if (pConnection != nullptr && pConnection->Connected()) {
 
                 auto pWSReply = pConnection->WSReply();
 
