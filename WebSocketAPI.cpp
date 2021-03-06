@@ -746,7 +746,7 @@ namespace Apostol {
                 pSession->SwitchConnection(AConnection);
             }
 
-            pSession->IP() = GetHost(AConnection);
+            pSession->IP() = GetRealIP(AConnection);
             pSession->Agent() = GetUserAgent(AConnection);
 
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
