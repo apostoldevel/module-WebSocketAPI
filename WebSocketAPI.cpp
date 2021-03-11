@@ -723,7 +723,7 @@ namespace Apostol {
             }
 
             const auto& caSession = slRouts[1];
-            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : GetUID(40).Lower();
+            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : "main";
 
             const auto& caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
             const auto& caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
