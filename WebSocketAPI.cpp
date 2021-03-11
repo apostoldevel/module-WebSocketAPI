@@ -1024,9 +1024,10 @@ namespace Apostol {
 
                 CStringList SQL;
 
-                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', '%s', %s::jsonb, %s, %s);",
+                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', '%s', %s, %s::jsonb, %s, %s);",
                                          Publisher.c_str(),
                                          ASession->Session().c_str(),
+                                         PQQuoteLiteral(ASession->Identity()).c_str(),
                                          PQQuoteLiteral(Data).c_str(),
                                          PQQuoteLiteral(ASession->Agent()).c_str(),
                                          PQQuoteLiteral(ASession->IP()).c_str()
