@@ -769,8 +769,6 @@ namespace Apostol {
 
         void CWebSocketAPI::DoWebSocket(CHTTPServerConnection *AConnection) {
 
-            CPQPollQuery *pQuery;
-
             auto pWSRequest = AConnection->WSRequest();
             const CString csRequest(pWSRequest->Payload());
 
