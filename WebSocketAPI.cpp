@@ -712,7 +712,7 @@ namespace Apostol {
                 return;
             }
 
-            if (slRouts[0] == "ws") {
+            if (slRouts[0] == _T("ws")) {
                 DoWS(AConnection, slRouts[1]);
                 return;
             }
@@ -723,7 +723,7 @@ namespace Apostol {
             }
 
             const auto& caSession = slRouts[1];
-            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : "main";
+            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : _T("main");
 
             const auto& caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
             const auto& caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
@@ -736,7 +736,7 @@ namespace Apostol {
             const CString csAccept(SHA1(caSecWebSocketKey + _T("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
             const CString csProtocol(caSecWebSocketProtocol.IsEmpty() ? "" : caSecWebSocketProtocol.SubString(0, caSecWebSocketProtocol.Find(',')));
 
-            auto pSession = m_SessionManager.FindByIdentity(caIdentity);
+            auto pSession = m_SessionManager.Find(caSession, caIdentity);
 
             if (pSession == nullptr) {
                 pSession = m_SessionManager.Add(AConnection);
