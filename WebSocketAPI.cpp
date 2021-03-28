@@ -212,9 +212,9 @@ namespace Apostol {
                 return;
             }
 
-            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
+            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
-            if (pConnection != nullptr && pConnection->Connected()) {
+            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
 
                 auto pWSReply = pConnection->WSReply();
 
@@ -262,7 +262,7 @@ namespace Apostol {
 
         void CWebSocketAPI::QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
 
-            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->PollConnection());
+            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
                 auto pWSRequest = pConnection->WSRequest();
@@ -435,17 +435,12 @@ namespace Apostol {
             auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
             if (pConnection != nullptr) {
 
-                auto pPollQuery = PQServer().FindQueryByConnection(pConnection);
-                if (pPollQuery != nullptr) {
-                    pPollQuery->PollConnection(nullptr);
-                }
-
                 auto pSession = m_SessionManager.FindByConnection(pConnection);
                 if (pSession != nullptr) {
-                    if (!pConnection->ClosedGracefully()) {
-                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Session %s: Closed connection."),
-                                       pConnection->Socket()->Binding()->PeerIP(),
-                                       pConnection->Socket()->Binding()->PeerPort(),
+                    auto pSocket = pConnection->Socket()->Binding();
+                    if (pSocket != nullptr) {
+                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
+                                       pSocket->PeerIP(), pSocket->PeerPort(),
                                        pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
                         );
                     }
@@ -454,10 +449,10 @@ namespace Apostol {
                         delete pSession;
                     }
                 } else {
-                    if (!pConnection->ClosedGracefully()) {
-                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Unknown session: Closed connection."),
-                                       pConnection->Socket()->Binding()->PeerIP(),
-                                       pConnection->Socket()->Binding()->PeerPort()
+                    auto pSocket = pConnection->Socket()->Binding();
+                    if (pSocket != nullptr) {
+                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
+                                       pSocket->PeerIP(), pSocket->PeerPort()
                         );
                     }
                 }
@@ -973,7 +968,14 @@ namespace Apostol {
 
             auto OnExecuted = [ASession](CPQPollQuery *APollQuery) {
 
-                auto pConnection = ASession->Connection();
+                if (ASession == nullptr)
+                    return;
+
+                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+
+                if (pConnection == nullptr)
+                    return;
+
                 if (pConnection->ClosedGracefully())
                     return;
 
@@ -1014,8 +1016,10 @@ namespace Apostol {
                 }
             };
 
-            auto OnException = [ASession](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                DoError(ASession->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E);
+            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+                if (pConnection != nullptr && !pConnection->ClosedGracefully())
+                    DoError(pConnection, CString(), CString(), CHTTPReply::service_unavailable, E);
             };
 
             if (ASession->Authorized()) {
