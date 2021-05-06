@@ -812,7 +812,6 @@ namespace Apostol {
 
                             pSession->Secret().Clear();
                             pSession->Authorization() << _T("Bearer ") + token;
-                            pSession->Authorization().TokenType = CAuthorization::attAccess;
                             pSession->Authorized(false);
 
                             wsmRequest.Payload.Clear();
