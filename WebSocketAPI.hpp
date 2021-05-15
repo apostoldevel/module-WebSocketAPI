@@ -42,9 +42,10 @@ namespace Apostol {
 
             CDateTime m_CheckDate;
 
-            int m_HeartbeatInterval;
-
             CSessionManager m_SessionManager;
+
+            void InitListen();
+            void CheckListen();
 
             void Observer(CSession *ASession, const CString &Publisher, const CString &Data);
 
@@ -88,8 +89,6 @@ namespace Apostol {
             static class CWebSocketAPI *CreateModule(CModuleProcess *AProcess) {
                 return new CWebSocketAPI(AProcess);
             }
-
-            void InitListen();
 
             bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);
             int CheckSessionAuthorization(CSession *ASession);

@@ -47,9 +47,7 @@ namespace Apostol {
             m_Headers.Add("Session");
             m_Headers.Add("Secret");
 
-            m_CheckDate = Now();
-
-            m_HeartbeatInterval = 60;
+            m_CheckDate = 0;
 
             CWebSocketAPI::InitMethods();
         }
@@ -192,12 +190,13 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
+#ifdef _DEBUG
             const auto& Info = AConnection->ConnInfo();
 
             DebugMessage("[NOTIFY] [%d] [postgresql://%s@%s:%s/%s] [PID: %d] [%s] %s\n",
                 AConnection->Socket(), Info["user"].c_str(), Info["host"].c_str(), Info["port"].c_str(), Info["dbname"].c_str(),
                 ANotify->be_pid, ANotify->relname, ANotify->extra);
-
+#endif
             for (int i = 0; i < m_SessionManager.Count(); ++i)
                 Observer(m_SessionManager[i], ANotify->relname, ANotify->extra);
         }
@@ -926,43 +925,6 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::InitListen() {
-
-            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
-                try {
-                    auto pResult = APollQuery->Results(0);
-
-                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                    }
-
-                    APollQuery->Connection()->Listener(true);
-#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-                    APollQuery->Connection()->OnNotify([this](auto && APollQuery, auto && ANotify) { DoPostgresNotify(APollQuery, ANotify); });
-#else
-                    APollQuery->Connection()->OnNotify(std::bind(&CWebSocketAPI::DoPostgresNotify, this, _1, _2));
-#endif
-                } catch (Delphi::Exception::Exception &E) {
-                    DoError(E);
-                }
-            };
-
-            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                DoError(E);
-            };
-
-            CStringList SQL;
-
-            SQL.Add("SELECT daemon.init_listen();");
-
-            try {
-                ExecSQL(SQL, nullptr, OnExecuted, OnException);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(E);
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
         void CWebSocketAPI::Observer(CSession *ASession, const CString &Publisher, const CString &Data) {
 
             auto OnExecuted = [ASession](CPQPollQuery *APollQuery) {
@@ -1044,20 +1006,59 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CWebSocketAPI::InitListen() {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+                try {
+                    auto pResult = APollQuery->Results(0);
+
+                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                    }
+
+                    APollQuery->Connection()->Listener(true);
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+                    APollQuery->Connection()->OnNotify([this](auto && APollQuery, auto && ANotify) { DoPostgresNotify(APollQuery, ANotify); });
+#else
+                    APollQuery->Connection()->OnNotify(std::bind(&CWebSocketAPI::DoPostgresNotify, this, _1, _2));
+#endif
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
+                }
+            };
+
+            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                DoError(E);
+            };
+
+            CStringList SQL;
+
+            SQL.Add("SELECT daemon.init_listen();");
+
+            try {
+                ExecSQL(SQL, nullptr, OnExecuted, OnException);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::CheckListen() {
+            int Index = 0;
+            while (Index < PQServer().PollManager()->Count() && !PQServer().Connections(Index)->Listener())
+                Index++;
+
+            if (Index == PQServer().PollManager()->Count())
+                InitListen();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CWebSocketAPI::Heartbeat() {
             CApostolModule::Heartbeat();
-
             const auto now = Now();
-
             if ((now >= m_CheckDate)) {
-                m_CheckDate = now + (CDateTime) m_HeartbeatInterval / SecsPerDay;
-
-                int Index = 0;
-                while (Index < PQServer().PollManager()->Count() && !PQServer().Connections(Index)->Listener())
-                    Index++;
-
-                if (Index == PQServer().PollManager()->Count())
-                    InitListen();
+                m_CheckDate = now + (CDateTime) 5 / MinsPerDay; // 5 min
+                CheckListen();
             }
         }
         //--------------------------------------------------------------------------------------------------------------
