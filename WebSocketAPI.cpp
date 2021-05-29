@@ -229,7 +229,7 @@ namespace Apostol {
 
                 try {
                     CString jsonString;
-                    PQResultToJson(pResult, jsonString, bDataArray);
+                    PQResultToJson(pResult, jsonString, bDataArray ? "array" : "object");
 
                     wsmResponse.Payload << jsonString;
 
