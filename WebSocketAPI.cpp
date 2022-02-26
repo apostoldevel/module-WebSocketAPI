@@ -1045,10 +1045,10 @@ namespace Apostol {
 
         void CWebSocketAPI::CheckListen() {
             int Index = 0;
-            while (Index < PQServer().PollManager()->Count() && !PQServer().Connections(Index)->Listener())
+            while (Index < PQClient().PollManager()->Count() && !PQClient().Connections(Index)->Listener())
                 Index++;
 
-            if (Index == PQServer().PollManager()->Count())
+            if (Index == PQClient().PollManager()->Count())
                 InitListen();
         }
         //--------------------------------------------------------------------------------------------------------------
