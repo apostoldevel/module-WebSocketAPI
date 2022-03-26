@@ -29,13 +29,76 @@ extern "C++" {
 
 namespace Apostol {
 
+    namespace BackEnd {
+
+        namespace api {
+
+            void observer(CStringList &SQL, const CString &Publisher, const CString &Session, const CString &Identity,
+                          const CString &Data, const CString &Agent, const CString &IP);
+        }
+    }
+
     namespace Workers {
+
+        class CObserverHandler;
+
+        typedef std::function<void (CObserverHandler *Handler)> COnObserverHandlerEvent;
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CObserverHandler ------------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CWebSocketAPI;
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CObserverHandler: public CPollConnection {
+        private:
+
+            CWebSocketAPI *m_pModule;
+            CSession *m_pSession;
+
+            CString m_Publisher {};
+            CString m_Data {};
+
+            bool m_Allow;
+
+            COnObserverHandlerEvent m_Handler;
+
+            int AddToQueue();
+            void RemoveFromQueue();
+
+        protected:
+
+            void SetAllow(bool Value) { m_Allow = Value; }
+
+        public:
+
+            CObserverHandler(CWebSocketAPI *AModule, CSession *ASession, const CString &Publisher, const CString &Data, COnObserverHandlerEvent && Handler);
+
+            ~CObserverHandler() override;
+
+            CSession *Session() { return m_pSession; }
+
+            const CString &Publisher() const { return m_Publisher; }
+            const CString &Data() const { return m_Data; }
+
+            bool Allow() const { return m_Allow; };
+            void Allow(bool Value) { SetAllow(Value); };
+
+            bool Handler();
+
+            void Close() override;
+        };
 
         //--------------------------------------------------------------------------------------------------------------
 
         //-- CWebSocketAPI -----------------------------------------------------------------------------------------------
 
         //--------------------------------------------------------------------------------------------------------------
+
+        typedef CPollManager CQueueManager;
 
         class CWebSocketAPI: public CApostolModule {
         private:
@@ -44,12 +107,23 @@ namespace Apostol {
 
             CSessionManager m_SessionManager;
 
+            CQueue m_Queue;
+            CQueueManager m_QueueManager;
+
+            size_t m_Progress;
+            size_t m_MaxQueue;
+
             void InitListen();
             void CheckListen();
 
-            void Observer(CSession *ASession, const CString &Publisher, const CString &Data);
-
             void InitMethods() override;
+
+            void UnloadQueue();
+
+            void DeleteHandler(CObserverHandler *AHandler);
+            static void DeleteSession(CSession *ASession);
+
+            void CheckSession();
 
             static void AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload);
 
@@ -67,6 +141,8 @@ namespace Apostol {
             static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
             static void DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
                 CHTTPReply::CStatusType Status, const std::exception &e);
+
+            void DoObserver(CObserverHandler *AHandler);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
@@ -117,6 +193,19 @@ namespace Apostol {
             bool Enabled() override;
 
             bool CheckLocation(const CLocation &Location) override;
+
+            void IncProgress() { m_Progress++; }
+            void DecProgress() { m_Progress--; }
+
+            int AddToQueue(CObserverHandler *AHandler);
+            void InsertToQueue(int Index, CObserverHandler *AHandler);
+            void RemoveFromQueue(CObserverHandler *AHandler);
+
+            CQueue &Queue() { return m_Queue; }
+            const CQueue &Queue() const { return m_Queue; }
+
+            CPollManager &QueueManager() { return m_QueueManager; }
+            const CPollManager &QueueManager() const { return m_QueueManager; }
 
         };
     }

@@ -34,7 +34,77 @@ extern "C++" {
 
 namespace Apostol {
 
+    namespace BackEnd {
+
+        namespace api {
+
+            void observer(CStringList &SQL, const CString &Publisher, const CString &Session, const CString &Identity,
+                          const CString &Data, const CString &Agent, const CString &IP) {
+                SQL.Add(CString()
+                                .MaxFormatSize(256 + Publisher.Size() + Session.Size() + Identity.Size() + Data.Size() + Agent.Size() + IP.Size())
+                                .Format("SELECT * FROM daemon.observer('%s', '%s', %s, %s::jsonb, %s, %s);",
+                                        Publisher.c_str(),
+                                        Session.c_str(),
+                                        PQQuoteLiteral(Identity).c_str(),
+                                        PQQuoteLiteral(Data).c_str(),
+                                        PQQuoteLiteral(Agent).c_str(),
+                                        PQQuoteLiteral(IP).c_str()
+                                ));
+            }
+        }
+    }
+    //------------------------------------------------------------------------------------------------------------------
+
     namespace Workers {
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CObserverHandler ------------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        CObserverHandler::CObserverHandler(CWebSocketAPI *AModule, CSession *ASession, const CString &Publisher,
+                const CString &Data, COnObserverHandlerEvent && Handler): CPollConnection(&AModule->QueueManager()), m_Allow(true) {
+            m_pModule = AModule;
+            m_pSession = ASession;
+            m_Publisher = Publisher;
+            m_Data = Data;
+            m_Handler = Handler;
+            m_pSession->BeginUpdate();
+            AddToQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CObserverHandler::Close() {
+            m_Allow = false;
+            m_pSession->EndUpdate();
+            m_pSession = nullptr;
+            RemoveFromQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CObserverHandler::~CObserverHandler() {
+            Close();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        int CObserverHandler::AddToQueue() {
+            return m_pModule->AddToQueue(this);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CObserverHandler::RemoveFromQueue() {
+            m_pModule->RemoveFromQueue(this);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        bool CObserverHandler::Handler() {
+            if (m_Allow && m_Handler) {
+                m_Handler(this);
+                return true;
+            }
+            return false;
+        }
 
         //--------------------------------------------------------------------------------------------------------------
 
@@ -48,6 +118,8 @@ namespace Apostol {
             m_Headers.Add("Secret");
 
             m_CheckDate = 0;
+            m_Progress = 0;
+            m_MaxQueue = Config()->PostgresPollMax();
 
             CWebSocketAPI::InitMethods();
         }
@@ -189,6 +261,68 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CWebSocketAPI::CheckSession() {
+            for (int i = 0; i < m_SessionManager.Count(); ++i) {
+                auto pSession = m_SessionManager[i];
+                if (pSession->Connection() != nullptr) {
+                    if (pSession->Connection()->ClosedGracefully()) {
+                        DeleteSession(pSession);
+                    }
+                } else {
+                    DeleteSession(pSession);
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DeleteSession(CSession *ASession) {
+            if (ASession == nullptr)
+                return;
+
+            if (ASession->UpdateCount() == 0) {
+                delete ASession;
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DeleteHandler(CObserverHandler *AHandler) {
+            delete AHandler;
+            DecProgress();
+            UnloadQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        int CWebSocketAPI::AddToQueue(CObserverHandler *AHandler) {
+            return m_Queue.AddToQueue(this, AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::InsertToQueue(int Index, CObserverHandler *AHandler) {
+            m_Queue.InsertToQueue(this, Index, AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::RemoveFromQueue(CObserverHandler *AHandler) {
+            m_Queue.RemoveFromQueue(this, AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::UnloadQueue() {
+            const auto index = m_Queue.IndexOf(this);
+            if (index != -1) {
+                const auto queue = m_Queue[index];
+                for (int i = 0; i < queue->Count(); ++i) {
+                    auto pHandler = (CObserverHandler *) queue->Item(i);
+                    if (pHandler != nullptr) {
+                        pHandler->Handler();
+                        if (m_Progress >= m_MaxQueue)
+                            break;
+                    }
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
 #ifdef _DEBUG
             const auto& Info = AConnection->ConnInfo();
@@ -197,8 +331,15 @@ namespace Apostol {
                 AConnection->Socket(), Info["user"].c_str(), Info["host"].c_str(), Info["port"].c_str(), Info["dbname"].c_str(),
                 ANotify->be_pid, ANotify->relname, ANotify->extra);
 #endif
-            for (int i = 0; i < m_SessionManager.Count(); ++i)
-                Observer(m_SessionManager[i], ANotify->relname, ANotify->extra);
+            for (int i = 0; i < m_SessionManager.Count(); ++i) {
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+                new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, [this](auto &&Handler) { DoObserver(Handler); });
+#else
+                new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, std::bind(&CWebSocketAPI::DoObserver, this, _1));
+#endif
+            }
+
+            UnloadQueue();
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -430,35 +571,6 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::DoSessionDisconnected(CObject *Sender) {
-            auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
-            if (pConnection != nullptr) {
-
-                auto pSession = m_SessionManager.FindByConnection(pConnection);
-                if (pSession != nullptr) {
-                    auto pSocket = pConnection->Socket()->Binding();
-                    if (pSocket != nullptr) {
-                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
-                                       pSocket->PeerIP(), pSocket->PeerPort(),
-                                       pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
-                        );
-                    }
-
-                    if (pSession->UpdateCount() == 0) {
-                        delete pSession;
-                    }
-                } else {
-                    auto pSocket = pConnection->Socket()->Binding();
-                    if (pSocket != nullptr) {
-                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
-                                       pSocket->PeerIP(), pSocket->PeerPort()
-                        );
-                    }
-                }
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
         bool CWebSocketAPI::CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization) {
 
             const auto &caHeaders = ARequest->Headers;
@@ -547,6 +659,124 @@ namespace Apostol {
             }
 
             return 0;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoObserver(CObserverHandler *AHandler) {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+
+                auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
+
+                if (pHandler == nullptr) {
+                    return;
+                }
+
+                auto Session = pHandler->Session();
+
+                if (Session == nullptr) {
+                    DeleteHandler(pHandler);
+                    return;
+                }
+
+                if (!Session->Authorized()) {
+                    DeleteHandler(pHandler);
+                    return;
+                }
+
+                if (Session->Connection() == nullptr) {
+                    DeleteHandler(pHandler);
+                    return;
+                }
+
+                if (Session->Connection()->ClosedGracefully()) {
+                    DeleteHandler(pHandler);
+                    return;
+                }
+
+                CHTTPReply::CStatusType status = CHTTPReply::internal_server_error;
+
+                try {
+                    auto pResult = APollQuery->Results(0);
+
+                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                    }
+
+                    if (pResult->nTuples() == 1) {
+                        const CJSON Payload(pResult->GetValue(0, 0));
+                        CString errorMessage;
+
+                        status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
+                        if (status == CHTTPReply::unauthorized) {
+                            Session->Session().Clear();
+                            Session->Secret().Clear();
+                            Session->Authorization().Clear();
+                            Session->Authorized(false);
+                        }
+
+                        if (status != CHTTPReply::ok) {
+                            throw Delphi::Exception::EDBError(errorMessage.c_str());
+                        }
+                    }
+
+                    if (pResult->nTuples() != 0) {
+                        CString jsonString;
+                        PQResultToJson(pResult, jsonString);
+                        DoCall(Session->Connection(), "/" + pHandler->Publisher(), jsonString);
+                    }
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(Session->Connection(), CString(), CString(), status, E);
+                }
+
+                DeleteHandler(pHandler);
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
+                if (pHandler != nullptr) {
+                    auto Session = pHandler->Session();
+                    if (Session != nullptr && !Session->Connection()->ClosedGracefully()) {
+                        DoError(Session->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E);
+                    }
+                    DeleteHandler(pHandler);
+                }
+            };
+
+            auto Session = AHandler->Session();
+
+            if (Session == nullptr) {
+                DeleteHandler(AHandler);
+                return;
+            }
+
+            if (!Session->Authorized()) {
+                DeleteHandler(AHandler);
+                return;
+            }
+
+            if (Session->Connection() == nullptr) {
+                DeleteHandler(AHandler);
+                return;
+            }
+
+            if (Session->Connection()->ClosedGracefully()) {
+                DeleteHandler(AHandler);
+                return;
+            }
+
+            CStringList SQL;
+
+            api::observer(SQL, AHandler->Publisher(), Session->Session(), Session->Identity(), AHandler->Data(), Session->Agent(), Session->IP());
+
+            try {
+                ExecSQL(SQL, AHandler, OnExecuted, OnException);
+                AHandler->Allow(false);
+                IncProgress();
+            } catch (Delphi::Exception::Exception &E) {
+                DeleteHandler(AHandler);
+                DoError(E);
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -865,6 +1095,32 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CWebSocketAPI::DoSessionDisconnected(CObject *Sender) {
+            auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
+            if (pConnection != nullptr) {
+                auto pSession = m_SessionManager.FindByConnection(pConnection);
+                if (pSession != nullptr) {
+                    auto pSocket = pConnection->Socket()->Binding();
+                    if (pSocket != nullptr) {
+                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
+                                       pSocket->PeerIP(), pSocket->PeerPort(),
+                                       pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
+                        );
+                    }
+                    pSession->SwitchConnection(nullptr);
+                    DeleteSession(pSession);
+                } else {
+                    auto pSocket = pConnection->Socket()->Binding();
+                    if (pSocket != nullptr) {
+                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
+                                       pSocket->PeerIP(), pSocket->PeerPort()
+                        );
+                    }
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
             CApostolModule::Initialization(AProcess);
         }
@@ -925,87 +1181,6 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::Observer(CSession *ASession, const CString &Publisher, const CString &Data) {
-
-            auto OnExecuted = [ASession](CPQPollQuery *APollQuery) {
-
-                if (ASession == nullptr)
-                    return;
-
-                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-
-                if (pConnection == nullptr)
-                    return;
-
-                if (pConnection->ClosedGracefully())
-                    return;
-
-                CHTTPReply::CStatusType status = CHTTPReply::internal_server_error;
-
-                try {
-                    auto pResult = APollQuery->Results(0);
-
-                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                    }
-
-                    if (pResult->nTuples() == 1) {
-                        const CJSON Payload(pResult->GetValue(0, 0));
-                        CString errorMessage;
-
-                        status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
-                        if (status == CHTTPReply::unauthorized) {
-                            ASession->Session().Clear();
-                            ASession->Secret().Clear();
-                            ASession->Authorization().Clear();
-                            ASession->Authorized(false);
-                        }
-
-                        if (status != CHTTPReply::ok) {
-                            throw Delphi::Exception::EDBError(errorMessage.c_str());
-                        }
-                    }
-
-                    if (pResult->nTuples() != 0) {
-                        const auto& publisher = APollQuery->Data()["publisher"];
-                        CString jsonString;
-                        PQResultToJson(pResult, jsonString);
-                        DoCall(pConnection, "/" + publisher, jsonString);
-                    }
-                } catch (Delphi::Exception::Exception &E) {
-                    DoError(pConnection, CString(), CString(), status, E);
-                }
-            };
-
-            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-                if (pConnection != nullptr && !pConnection->ClosedGracefully())
-                    DoError(pConnection, CString(), CString(), CHTTPReply::service_unavailable, E);
-            };
-
-            if (ASession->Authorized()) {
-
-                CStringList SQL;
-
-                SQL.Add(CString().Format("SELECT * FROM daemon.observer('%s', '%s', %s, %s::jsonb, %s, %s);",
-                                         Publisher.c_str(),
-                                         ASession->Session().c_str(),
-                                         PQQuoteLiteral(ASession->Identity()).c_str(),
-                                         PQQuoteLiteral(Data).c_str(),
-                                         PQQuoteLiteral(ASession->Agent()).c_str(),
-                                         PQQuoteLiteral(ASession->IP()).c_str()
-                ));
-
-                try {
-                    auto pQuery = ExecSQL(SQL, ASession->Connection(), OnExecuted, OnException);
-                    pQuery->Data().Values(_T("publisher"), Publisher);
-                } catch (Delphi::Exception::Exception &E) {
-                    DoError(E);
-                }
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
         void CWebSocketAPI::InitListen() {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
@@ -1059,7 +1234,9 @@ namespace Apostol {
             if ((now >= m_CheckDate)) {
                 m_CheckDate = now + (CDateTime) 5 / MinsPerDay; // 5 min
                 CheckListen();
+                CheckSession();
             }
+            UnloadQueue();
         }
         //--------------------------------------------------------------------------------------------------------------
 
