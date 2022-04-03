@@ -119,7 +119,7 @@ namespace Apostol {
 
             m_CheckDate = 0;
             m_Progress = 0;
-            m_MaxQueue = Config()->PostgresPollMax();
+            m_MaxQueue = Config()->PostgresPollMin();
 
             CWebSocketAPI::InitMethods();
         }
