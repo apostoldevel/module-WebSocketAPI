@@ -529,7 +529,7 @@ namespace Apostol {
 
             sData = Action;
             sData << caNonce;
-            sData << (Payload.IsEmpty() ? _T("null") : Payload);
+            sData << (Payload.IsEmpty() || Payload == "{}" || Payload == "[]" ? _T("null") : Payload);
 
             const auto& caSignature = ASession->Secret().IsEmpty() ? _T("") : hmac_sha256(ASession->Secret(), sData);
 
@@ -1076,7 +1076,7 @@ namespace Apostol {
                         if (caAuthorization.Schema != CAuthorization::asUnknown) {
                             AuthorizedFetch(AConnection, caAuthorization, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
                         } else {
-                            PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession);
+                            PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.IsNull() ? CString() : wsmRequest.Payload.ToString(), pSession);
                         }
                     }
                 } catch (jwt::token_expired_exception &e) {
