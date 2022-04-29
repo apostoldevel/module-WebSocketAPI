@@ -140,7 +140,7 @@ namespace Apostol {
 
             static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
             static void DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                CHTTPReply::CStatusType Status, const std::exception &e);
+                CHTTPReply::CStatusType Status, const std::exception &e, const CString &Payload = {});
 
             void DoObserver(CObserverHandler *AHandler);
 
@@ -188,7 +188,7 @@ namespace Apostol {
 
             bool Execute(CHTTPServerConnection *AConnection) override;
 
-            void Heartbeat() override;
+            void Heartbeat(CDateTime DateTime) override;
 
             bool Enabled() override;
 

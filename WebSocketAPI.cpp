@@ -30,6 +30,9 @@ Author:
 #include "jwt.h"
 //----------------------------------------------------------------------------------------------------------------------
 
+#define PG_LISTEN_NAME "daemon.init_listen()"
+//----------------------------------------------------------------------------------------------------------------------
+
 extern "C++" {
 
 namespace Apostol {
@@ -324,13 +327,8 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
-#ifdef _DEBUG
-            const auto& Info = AConnection->ConnInfo();
+            DebugNotify(AConnection, ANotify);
 
-            DebugMessage("[NOTIFY] [%d] [postgresql://%s@%s:%s/%s] [PID: %d] [%s] %s\n",
-                AConnection->Socket(), Info["user"].c_str(), Info["host"].c_str(), Info["port"].c_str(), Info["dbname"].c_str(),
-                ANotify->be_pid, ANotify->relname, ANotify->extra);
-#endif
             for (int i = 0; i < m_SessionManager.Count(); ++i) {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
                 new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, [this](auto &&Handler) { DoObserver(Handler); });
@@ -806,7 +804,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                CHTTPReply::CStatusType Status, const std::exception &e) {
+                                    CHTTPReply::CStatusType Status, const std::exception &e, const CString &Payload) {
 
             if (AConnection->ClosedGracefully())
                 return;
@@ -829,7 +827,11 @@ namespace Apostol {
             pWSReply->SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
-            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [ERROR] [%s] [%s] [%d] %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, e.what());
+            if (Payload.IsEmpty()) {
+                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [%s] [%s] [%d]\n\tMESSAGE: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, e.what());
+            } else {
+                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [%s] [%s] [%d]\n\tMESSAGE: %s\n\tPAYLOAD: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, e.what(), Payload.c_str());
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -1084,7 +1086,7 @@ namespace Apostol {
                 } catch (CAuthorizationError &e) {
                     DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e);
                 } catch (std::exception &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e);
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e, csRequest);
                 }
             } catch (std::exception &e) {
                 AConnection->SendWebSocketClose();
@@ -1151,11 +1153,11 @@ namespace Apostol {
             const auto& Providers = Server().Providers();
 
             CString Application;
-            const auto Index = OAuth2::Helper::ProviderByClientId(Providers, aud, Application);
-            if (Index == -1)
+            const auto index = OAuth2::Helper::ProviderByClientId(Providers, aud, Application);
+            if (index == -1)
                 throw COAuth2Error(_T("Not found provider by Client ID."));
 
-            const auto& Provider = Providers[Index].Value();
+            const auto& Provider = Providers[index].Value();
             const auto& Secret = OAuth2::Helper::GetSecret(Provider, Application);
 
             CStringList Issuers;
@@ -1191,7 +1193,7 @@ namespace Apostol {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
                     }
 
-                    APollQuery->Connection()->Listener(true);
+                    APollQuery->Connection()->Listeners().Add(PG_LISTEN_NAME);
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
                     APollQuery->Connection()->OnNotify([this](auto && APollQuery, auto && ANotify) { DoPostgresNotify(APollQuery, ANotify); });
 #else
@@ -1208,7 +1210,7 @@ namespace Apostol {
 
             CStringList SQL;
 
-            SQL.Add("SELECT daemon.init_listen();");
+            SQL.Add("SELECT " PG_LISTEN_NAME ";");
 
             try {
                 ExecSQL(SQL, nullptr, OnExecuted, OnException);
@@ -1219,20 +1221,15 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::CheckListen() {
-            int Index = 0;
-            while (Index < PQClient().PollManager().Count() && !PQClient().Connections(Index)->Listener())
-                Index++;
-
-            if (Index == PQClient().PollManager().Count())
+            if (!PQClient().CheckListen(PG_LISTEN_NAME))
                 InitListen();
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::Heartbeat() {
-            CApostolModule::Heartbeat();
-            const auto now = Now();
-            if ((now >= m_CheckDate)) {
-                m_CheckDate = now + (CDateTime) 5 / MinsPerDay; // 5 min
+        void CWebSocketAPI::Heartbeat(CDateTime DateTime) {
+            CApostolModule::Heartbeat(DateTime);
+            if ((DateTime >= m_CheckDate)) {
+                m_CheckDate = DateTime + (CDateTime) 1 / MinsPerDay; // 1 min
                 CheckListen();
                 CheckSession();
             }
