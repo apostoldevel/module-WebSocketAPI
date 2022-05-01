@@ -58,7 +58,7 @@ namespace Apostol {
     }
     //------------------------------------------------------------------------------------------------------------------
 
-    namespace Workers {
+    namespace Module {
 
         //--------------------------------------------------------------------------------------------------------------
 
@@ -115,7 +115,7 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "web socket api") {
+        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "websocket api", "module/WebSocketAPI") {
             m_Headers.Add("Authorization");
             m_Headers.Add("Session");
             m_Headers.Add("Secret");

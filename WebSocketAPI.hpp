@@ -38,7 +38,7 @@ namespace Apostol {
         }
     }
 
-    namespace Workers {
+    namespace Module {
 
         class CObserverHandler;
 
@@ -211,6 +211,6 @@ namespace Apostol {
     }
 }
 
-using namespace Apostol::Workers;
+using namespace Apostol::Module;
 }
 #endif //APOSTOL_WEBSOCKETAPI_HPP
