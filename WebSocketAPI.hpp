@@ -182,7 +182,7 @@ namespace Apostol {
 
             void SignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
                 const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
-                const CString &Agent, const CString &Host, long int ReceiveWindow = 5000);
+                const CString &Agent, const CString &Host, long int ReceiveWindow = 60000);
 
             void Initialization(CModuleProcess *AProcess) override;
 
