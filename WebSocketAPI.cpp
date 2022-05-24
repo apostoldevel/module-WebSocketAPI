@@ -1239,7 +1239,7 @@ namespace Apostol {
 
         bool CWebSocketAPI::Enabled() {
             if (m_ModuleStatus == msUnknown)
-                m_ModuleStatus = Config()->IniFile().ReadBool("worker/WebSocketAPI", "enable", true) ? msEnabled : msDisabled;
+                m_ModuleStatus = Config()->IniFile().ReadBool(SectionName().c_str(), "enable", true) ? msEnabled : msDisabled;
             return m_ModuleStatus == msEnabled;
         }
         //--------------------------------------------------------------------------------------------------------------
