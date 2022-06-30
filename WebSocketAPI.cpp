@@ -962,6 +962,7 @@ namespace Apostol {
             const CString csAccept(SHA1(caSecWebSocketKey + _T("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
             const CString csProtocol(caSecWebSocketProtocol.IsEmpty() ? "" : caSecWebSocketProtocol.SubString(0, caSecWebSocketProtocol.Find(',')));
 
+#ifdef WS_ONE_SESSION
             auto pSession = m_SessionManager.Find(caSession, caIdentity);
 
             if (pSession == nullptr) {
@@ -971,6 +972,12 @@ namespace Apostol {
             } else {
                 pSession->SwitchConnection(AConnection);
             }
+#else
+            auto pSession = m_SessionManager.Add(AConnection);
+
+            pSession->Session() = caSession;
+            pSession->Identity() = caIdentity;
+#endif
 
             pSession->IP() = GetRealIP(AConnection);
             pSession->Agent() = GetUserAgent(AConnection);
