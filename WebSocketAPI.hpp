@@ -129,12 +129,12 @@ namespace Apostol {
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
-            static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
-
             static int CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError = false);
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
 
         protected:
+
+            static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
 
             static void DoError(const Delphi::Exception::Exception &E);
 
@@ -145,10 +145,12 @@ namespace Apostol {
             void DoObserver(CObserverHandler *AHandler);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
-            void DoPost(CHTTPServerConnection *AConnection);
+            virtual void DoPost(CHTTPServerConnection *AConnection);
             void DoWS(CHTTPServerConnection *AConnection, const CString &Action);
 
+            void DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity);
             void DoWebSocket(CHTTPServerConnection *AConnection);
+
             void DoSessionDisconnected(CObject *Sender);
 
             void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
@@ -158,12 +160,12 @@ namespace Apostol {
 
         public:
 
-            explicit CWebSocketAPI(CModuleProcess *AProcess);
+            explicit CWebSocketAPI(CModuleProcess *AProcess, const CString& ModuleName, const CString& SectionName = CString());
 
             ~CWebSocketAPI() override = default;
 
             static class CWebSocketAPI *CreateModule(CModuleProcess *AProcess) {
-                return new CWebSocketAPI(AProcess);
+                return new CWebSocketAPI(AProcess, "websocket api", "module/WebSocketAPI");
             }
 
             bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);

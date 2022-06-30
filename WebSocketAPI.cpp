@@ -115,7 +115,9 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess) : CApostolModule(AProcess, "websocket api", "module/WebSocketAPI") {
+        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess, const CString &ModuleName, const CString &SectionName)
+                : CApostolModule(AProcess, ModuleName, SectionName) {
+
             m_Headers.Add("Authorization");
             m_Headers.Add("Session");
             m_Headers.Add("Secret");
@@ -218,7 +220,7 @@ namespace Apostol {
 
         void CWebSocketAPI::AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload) {
 
-            auto pSession = CSession::FindOfConnection(AConnection);
+            auto pSession = dynamic_cast<CSession *> (AConnection->Session());
 
             auto SignIn = [pSession](const CJSON &Payload) {
 
@@ -948,8 +950,13 @@ namespace Apostol {
                 return;
             }
 
-            const auto& caSession = slRouts[1];
-            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : _T("main");
+            DoSession(AConnection, slRouts[1], slRouts.Count() == 3 ? slRouts[2] : _T("main"));
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity) {
+
+            auto pRequest = AConnection->Request();
 
             const auto& caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
             const auto& caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
@@ -975,8 +982,8 @@ namespace Apostol {
 #else
             auto pSession = m_SessionManager.Add(AConnection);
 
-            pSession->Session() = caSession;
-            pSession->Identity() = caIdentity;
+            pSession->Session() = Session;
+            pSession->Identity() = Identity;
 #endif
 
             pSession->IP() = GetRealIP(AConnection);
@@ -1012,7 +1019,7 @@ namespace Apostol {
                 CWSMessage wsmRequest;
                 CWSMessage wsmResponse;
 
-                auto pSession = CSession::FindOfConnection(AConnection);
+                auto pSession = dynamic_cast<CSession *> (AConnection->Session());
 
                 try {
                     CWSProtocol::Request(csRequest, wsmRequest);
