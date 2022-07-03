@@ -220,7 +220,7 @@ namespace Apostol {
 
         void CWebSocketAPI::AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload) {
 
-            auto pSession = dynamic_cast<CSession *> (AConnection->Session());
+            auto pSession = dynamic_cast<CSession *> (AConnection->Object());
 
             auto SignIn = [pSession](const CJSON &Payload) {
 
@@ -461,7 +461,7 @@ namespace Apostol {
                 pQuery->Data().Values(_T("UniqueId"), UniqueId);
                 pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E);
+                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E.what());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -515,7 +515,7 @@ namespace Apostol {
                 pQuery->Data().Values(_T("UniqueId"), UniqueId);
                 pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E);
+                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E.what());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -566,7 +566,7 @@ namespace Apostol {
                 pQuery->Data().Values(_T("UniqueId"), UniqueId);
                 pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E);
+                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E.what());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -726,7 +726,7 @@ namespace Apostol {
                         DoCall(Session->Connection(), "/" + pHandler->Publisher(), jsonString);
                     }
                 } catch (Delphi::Exception::Exception &E) {
-                    DoError(Session->Connection(), CString(), CString(), status, E);
+                    DoError(Session->Connection(), CString(), CString(), status, E.what());
                 }
 
                 DeleteHandler(pHandler);
@@ -737,7 +737,7 @@ namespace Apostol {
                 if (pHandler != nullptr) {
                     auto Session = pHandler->Session();
                     if (Session != nullptr && !Session->Connection()->ClosedGracefully()) {
-                        DoError(Session->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E);
+                        DoError(Session->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E.what());
                     }
                     DeleteHandler(pHandler);
                 }
@@ -805,8 +805,67 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CWebSocketAPI::DoCallResult(CHTTPServerConnection *AConnection, const CString &Payload) {
+            if (AConnection->ClosedGracefully())
+                return;
+
+            auto pWSRequest = AConnection->WSRequest();
+            auto pWSReply = AConnection->WSReply();
+
+            CWSMessage wsmRequest;
+            CWSMessage wsmResponse;
+
+            const CString csRequest(pWSRequest->Payload());
+
+            CWSProtocol::Request(csRequest, wsmRequest);
+            CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
+
+            wsmResponse.Payload << Payload;
+
+            CString sResponse;
+            CWSProtocol::Response(wsmResponse, sResponse);
+
+            pWSReply->SetPayload(sResponse);
+            AConnection->SendWebSocket(true);
+
+            if (Payload.IsEmpty()) {
+                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str());
+            } else {
+                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]\n\tPAYLOAD: %s", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str(), Payload.c_str());
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::DoCallResult(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action, const CString &Payload) {
+
+            if (AConnection->ClosedGracefully())
+                return;
+
+            auto pWSReply = AConnection->WSReply();
+
+            CWSMessage wsmResponse;
+
+            wsmResponse.MessageTypeId = mtCallResult;
+            wsmResponse.UniqueId = UniqueId;
+            wsmResponse.Action = Action.IsEmpty() ? "Unknown" : Action;
+            wsmResponse.Payload << Payload;
+
+            CString sResponse;
+            CWSProtocol::Response(wsmResponse, sResponse);
+
+            pWSReply->SetPayload(sResponse);
+            AConnection->SendWebSocket(true);
+
+            if (Payload.IsEmpty()) {
+                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str());
+            } else {
+                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]\n\tPAYLOAD: %s", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str(), Payload.c_str());
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                                    CHTTPReply::CStatusType Status, const std::exception &e, const CString &Payload) {
+                                    CHTTPReply::CStatusType Status, const CString &Message, const CString &Payload) {
 
             if (AConnection->ClosedGracefully())
                 return;
@@ -821,7 +880,7 @@ namespace Apostol {
             wsmMessage.Action = Action.IsEmpty() ? _T("/error") : Action;
 
             wsmMessage.ErrorCode = Status;
-            wsmMessage.ErrorMessage = e.what();
+            wsmMessage.ErrorMessage = Message;
 
             CString sResponse;
             CWSProtocol::Response(wsmMessage, sResponse);
@@ -830,9 +889,9 @@ namespace Apostol {
             AConnection->SendWebSocket(true);
 
             if (Payload.IsEmpty()) {
-                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [%s] [%s] [%d]\n\tMESSAGE: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, e.what());
+                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [ERROR] [%s] [%s] [%d]\n\tMESSAGE: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, Message.c_str());
             } else {
-                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [%s] [%s] [%d]\n\tMESSAGE: %s\n\tPAYLOAD: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, e.what(), Payload.c_str());
+                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [ERROR] [%s] [%s] [%d]\n\tMESSAGE: %s\n\tPAYLOAD: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, Message.c_str(), Payload.c_str());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -1019,7 +1078,7 @@ namespace Apostol {
                 CWSMessage wsmRequest;
                 CWSMessage wsmResponse;
 
-                auto pSession = dynamic_cast<CSession *> (AConnection->Session());
+                auto pSession = dynamic_cast<CSession *> (AConnection->Object());
 
                 try {
                     CWSProtocol::Request(csRequest, wsmRequest);
@@ -1096,11 +1155,11 @@ namespace Apostol {
                         }
                     }
                 } catch (jwt::token_expired_exception &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::forbidden, e);
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::forbidden, e.what());
                 } catch (CAuthorizationError &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e);
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e.what());
                 } catch (std::exception &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e, csRequest);
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e.what(), csRequest);
                 }
             } catch (std::exception &e) {
                 AConnection->SendWebSocketClose();

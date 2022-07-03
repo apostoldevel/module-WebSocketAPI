@@ -139,22 +139,23 @@ namespace Apostol {
             static void DoError(const Delphi::Exception::Exception &E);
 
             static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
+            static void DoCallResult(CHTTPServerConnection *AConnection, const CString &Payload);
+            static void DoCallResult(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action, const CString &Payload);
             static void DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                CHTTPReply::CStatusType Status, const std::exception &e, const CString &Payload = {});
+                CHTTPReply::CStatusType Status, const CString &Message, const CString &Payload = {});
 
             void DoObserver(CObserverHandler *AHandler);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             virtual void DoPost(CHTTPServerConnection *AConnection);
-            void DoWS(CHTTPServerConnection *AConnection, const CString &Action);
+            virtual void DoWebSocket(CHTTPServerConnection *AConnection);
 
+            void DoWS(CHTTPServerConnection *AConnection, const CString &Action);
             void DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity);
-            void DoWebSocket(CHTTPServerConnection *AConnection);
 
             void DoSessionDisconnected(CObject *Sender);
 
             void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
-
             void DoPostgresQueryExecuted(CPQPollQuery *APollQuery) override;
             void DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) override;
 
