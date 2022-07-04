@@ -220,7 +220,7 @@ namespace Apostol {
 
         void CWebSocketAPI::AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload) {
 
-            auto pSession = dynamic_cast<CSession *> (AConnection->Session());
+            auto pSession = dynamic_cast<CSession *> (AConnection->Object());
 
             auto SignIn = [pSession](const CJSON &Payload) {
 
@@ -1019,7 +1019,7 @@ namespace Apostol {
                 CWSMessage wsmRequest;
                 CWSMessage wsmResponse;
 
-                auto pSession = dynamic_cast<CSession *> (AConnection->Session());
+                auto pSession = dynamic_cast<CSession *> (AConnection->Object());
 
                 try {
                     CWSProtocol::Request(csRequest, wsmRequest);
