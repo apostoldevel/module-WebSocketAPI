@@ -352,6 +352,9 @@ namespace Apostol {
                 return;
             }
 
+            if (APollQuery->Binding() == nullptr)
+                return;
+
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
