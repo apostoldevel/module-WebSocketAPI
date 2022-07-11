@@ -352,9 +352,6 @@ namespace Apostol {
                 return;
             }
 
-            if (APollQuery->Binding() == nullptr)
-                return;
-
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
@@ -1032,12 +1029,12 @@ namespace Apostol {
             const CString csProtocol(caSecWebSocketProtocol.IsEmpty() ? "" : caSecWebSocketProtocol.SubString(0, caSecWebSocketProtocol.Find(',')));
 
 #ifdef WS_ONE_SESSION
-            auto pSession = m_SessionManager.Find(caSession, caIdentity);
+            auto pSession = m_SessionManager.Find(Session, Identity);
 
             if (pSession == nullptr) {
                 pSession = m_SessionManager.Add(AConnection);
-                pSession->Session() = caSession;
-                pSession->Identity() = caIdentity;
+                pSession->Session() = Session;
+                pSession->Identity() = Identity;
             } else {
                 pSession->SwitchConnection(AConnection);
             }
