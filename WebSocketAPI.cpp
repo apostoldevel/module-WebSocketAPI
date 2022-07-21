@@ -1177,7 +1177,7 @@ namespace Apostol {
                 if (pSession != nullptr) {
                     auto pSocket = pConnection->Socket()->Binding();
                     if (pSocket != nullptr) {
-                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
+                        Log()->Notice(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
                                        pSocket->PeerIP(), pSocket->PeerPort(),
                                        pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
                         );
@@ -1187,7 +1187,7 @@ namespace Apostol {
                 } else {
                     auto pSocket = pConnection->Socket()->Binding();
                     if (pSocket != nullptr) {
-                        Log()->Message(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
+                        Log()->Notice(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
                                        pSocket->PeerIP(), pSocket->PeerPort()
                         );
                     }
