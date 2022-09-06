@@ -66,22 +66,18 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CObserverHandler::CObserverHandler(CWebSocketAPI *AModule, CSession *ASession, const CString &Publisher,
+        CObserverHandler::CObserverHandler(CWebSocketAPI *AModule, const CString &Publisher,
                 const CString &Data, COnObserverHandlerEvent && Handler): CPollConnection(&AModule->QueueManager()), m_Allow(true) {
             m_pModule = AModule;
-            m_pSession = ASession;
             m_Publisher = Publisher;
             m_Data = Data;
             m_Handler = Handler;
-            m_pSession->BeginUpdate();
             AddToQueue();
         }
         //--------------------------------------------------------------------------------------------------------------
 
         void CObserverHandler::Close() {
             m_Allow = false;
-            m_pSession->EndUpdate();
-            m_pSession = nullptr;
             RemoveFromQueue();
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -331,13 +327,11 @@ namespace Apostol {
         void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
             DebugNotify(AConnection, ANotify);
 
-            for (int i = 0; i < m_SessionManager.Count(); ++i) {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-                new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, [this](auto &&Handler) { DoObserver(Handler); });
+            new CObserverHandler(this, ANotify->relname, ANotify->extra, [this](auto &&Handler) { DoObserver(Handler); });
 #else
-                new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, std::bind(&CWebSocketAPI::DoObserver, this, _1));
+            new CObserverHandler(this, ANotify->relname, ANotify->extra, std::bind(&CWebSocketAPI::DoObserver, this, _1));
 #endif
-            }
 
             UnloadQueue();
         }
@@ -672,61 +666,51 @@ namespace Apostol {
                     return;
                 }
 
-                auto Session = pHandler->Session();
-
-                if (Session == nullptr) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                if (!Session->Authorized()) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                if (Session->Connection() == nullptr) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                if (Session->Connection()->ClosedGracefully()) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
+                CPQResult *pResult;
+                CSession *pSession;
 
                 CHTTPReply::CStatusType status = CHTTPReply::internal_server_error;
 
-                try {
-                    auto pResult = APollQuery->Results(0);
+                for (int i = 0; i < APollQuery->Count(); i++) {
+                    pResult = APollQuery->Results(i);
+                    pSession = (CSession *) pHandler->Sessions()[i];
 
-                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                    }
+                    if (pSession->Connection() == nullptr)
+                        continue;
 
-                    if (pResult->nTuples() == 1) {
-                        const CJSON Payload(pResult->GetValue(0, 0));
-                        CString errorMessage;
+                    if (!pSession->Connection()->Connected())
+                        continue;
 
-                        status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
-                        if (status == CHTTPReply::unauthorized) {
-                            Session->Session().Clear();
-                            Session->Secret().Clear();
-                            Session->Authorization().Clear();
-                            Session->Authorized(false);
+                    try {
+                        if (pResult->ExecStatus() != PGRES_TUPLES_OK)
+                            throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+
+                        if (pResult->nTuples() == 0)
+                            continue;
+
+                        if (pResult->nTuples() == 1) {
+                            const CJSON Payload(pResult->GetValue(0, 0));
+                            CString errorMessage;
+
+                            status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
+                            if (status == CHTTPReply::unauthorized) {
+                                pSession->Session().Clear();
+                                pSession->Secret().Clear();
+                                pSession->Authorization().Clear();
+                                pSession->Authorized(false);
+                            }
+
+                            if (status != CHTTPReply::ok) {
+                                throw Delphi::Exception::EDBError(errorMessage.c_str());
+                            }
                         }
 
-                        if (status != CHTTPReply::ok) {
-                            throw Delphi::Exception::EDBError(errorMessage.c_str());
-                        }
-                    }
-
-                    if (pResult->nTuples() != 0) {
                         CString jsonString;
                         PQResultToJson(pResult, jsonString);
-                        DoCall(Session->Connection(), "/" + pHandler->Publisher(), jsonString);
+                        DoCall(pSession->Connection(), "/" + pHandler->Publisher(), jsonString);
+                    } catch (Delphi::Exception::Exception &E) {
+                        DoError(pSession->Connection(), CString(), CString(), status, E.what());
                     }
-                } catch (Delphi::Exception::Exception &E) {
-                    DoError(Session->Connection(), CString(), CString(), status, E.what());
                 }
 
                 DeleteHandler(pHandler);
@@ -735,39 +719,32 @@ namespace Apostol {
             auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
                 auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
                 if (pHandler != nullptr) {
-                    auto Session = pHandler->Session();
-                    if (Session != nullptr && !Session->Connection()->ClosedGracefully()) {
-                        DoError(Session->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E.what());
+                    for (int i = 0; i < pHandler->Sessions().Count(); ++i) {
+                        const auto pSession = (CSession *) pHandler->Sessions()[i];
+                        if (pSession != nullptr && !pSession->Connection()->ClosedGracefully()) {
+                            DoError(pSession->Connection(), CString(), CString(),
+                                    CHTTPReply::service_unavailable, E.what());
+                        }
                     }
                     DeleteHandler(pHandler);
                 }
             };
 
-            auto Session = AHandler->Session();
-
-            if (Session == nullptr) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            if (!Session->Authorized()) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            if (Session->Connection() == nullptr) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            if (Session->Connection()->ClosedGracefully()) {
+            if (m_SessionManager.Count() == 0) {
                 DeleteHandler(AHandler);
                 return;
             }
 
             CStringList SQL;
 
-            api::observer(SQL, AHandler->Publisher(), Session->Session(), Session->Identity(), AHandler->Data(), Session->Agent(), Session->IP());
+            AHandler->Sessions().Clear();
+            for (int i = 0; i < m_SessionManager.Count(); ++i) {
+                const auto pSession = m_SessionManager[i];
+                if (pSession->Connection() != nullptr && pSession->Connection()->Connected() && pSession->Authorized()) {
+                    AHandler->Sessions().Add(pSession);
+                    api::observer(SQL, AHandler->Publisher(), pSession->Session(), pSession->Identity(), AHandler->Data(), pSession->Agent(), pSession->IP());
+                }
+            }
 
             try {
                 ExecSQL(SQL, AHandler, OnExecuted, OnException);
