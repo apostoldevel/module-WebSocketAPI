@@ -155,7 +155,7 @@ namespace Apostol {
             int errorCode = 0;
 
             if (Json.HasOwnProperty(_T("error"))) {
-                const auto& error = Json[_T("error")];
+                const auto &error = Json[_T("error")];
 
                 if (error.HasOwnProperty(_T("code"))) {
                     errorCode = error[_T("code")].AsInteger();
@@ -220,8 +220,8 @@ namespace Apostol {
 
             auto SignIn = [pSession](const CJSON &Payload) {
 
-                const auto& session = Payload[_T("session")].AsString();
-                const auto& secret = Payload[_T("secret")].AsString();
+                const auto &session = Payload[_T("session")].AsString();
+                const auto &secret = Payload[_T("secret")].AsString();
 
                 pSession->Session() = session;
                 pSession->Secret() = secret;
@@ -245,7 +245,7 @@ namespace Apostol {
                     pSession->Secret().Clear();
                     pSession->Authorization().Clear();
 
-                    const auto& message = Payload[_T("message")].AsString();
+                    const auto &message = Payload[_T("message")].AsString();
                     throw Delphi::Exception::Exception(message.IsEmpty() ? _T("Unknown error.") : message.c_str());
                 }
             };
@@ -519,13 +519,13 @@ namespace Apostol {
 
             CString sData;
 
-            const auto& caNonce = LongToString(MsEpoch() * 1000);
+            const auto &caNonce = LongToString(MsEpoch() * 1000);
 
             sData = Action;
             sData << caNonce;
             sData << (Payload.IsEmpty() || Payload == "{}" || Payload == "[]" ? _T("null") : Payload);
 
-            const auto& caSignature = ASession->Secret().IsEmpty() ? _T("") : hmac_sha256(ASession->Secret(), sData);
+            const auto &caSignature = ASession->Secret().IsEmpty() ? _T("") : hmac_sha256(ASession->Secret(), sData);
 
             SignedFetch(AConnection, UniqueId, Action, Payload, ASession->Session(), caNonce, caSignature, ASession->Agent(), ASession->IP());
         }
@@ -592,6 +592,36 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization) {
+
+            auto pRequest = AConnection->Request();
+
+            try {
+                if (CheckAuthorizationData(pRequest, Authorization)) {
+                    if (Authorization.Schema == CAuthorization::asBearer) {
+                        VerifyToken(Authorization.Token);
+                        return true;
+                    }
+                }
+
+                if (Authorization.Schema == CAuthorization::asBasic)
+                    AConnection->Data().Values("Authorization", "Basic");
+
+                ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
+            } catch (jwt::token_expired_exception &e) {
+                ReplyError(AConnection, CHTTPReply::forbidden, e.what());
+            } catch (jwt::token_verification_exception &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            } catch (CAuthorizationError &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            } catch (std::exception &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            }
+
+            return false;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         bool CWebSocketAPI::CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session,
                 CAuthorization &Authorization) {
 
@@ -621,6 +651,56 @@ namespace Apostol {
             }
 
             return false;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CWebSocketAPI::CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization,
+                COnSocketExecuteEvent && OnContinue) {
+
+            auto OnExecuted = [OnContinue](CPQPollQuery *APollQuery) {
+                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+
+                try {
+                    auto pResult = APollQuery->Results(0);
+
+                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                    }
+
+                    OnContinue(pConnection);
+                } catch (Delphi::Exception::Exception &E) {
+                    ReplyError(pConnection, CHTTPReply::bad_request, E.what());
+                }
+            };
+
+            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+                ReplyError(pConnection, CHTTPReply::bad_request, E.what());
+            };
+
+            auto pRequest = AConnection->Request();
+
+            try {
+                if (CheckAuthorizationData(pRequest, Authorization)) {
+                    if (Authorization.Schema == CAuthorization::asBearer) {
+                        CStringList SQL;
+
+                        SQL.Add(CString().Format("SELECT daemon.validation(%s);", PQQuoteLiteral(Authorization.Token).c_str()));
+                        ExecSQL(SQL, AConnection, OnExecuted, OnException);
+
+                        return;
+                    }
+                }
+
+                if (Authorization.Schema == CAuthorization::asBasic)
+                    AConnection->Data().Values("Authorization", "Basic");
+
+                ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
+            } catch (CAuthorizationError &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            } catch (std::exception &e) {
+                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -936,8 +1016,8 @@ namespace Apostol {
             CSession *pSession;
             bool bSent = false;
 
-            const auto& caSession = slRouts[1];
-            const auto& caIdentity = slRouts.Count() == 3 ? slRouts[2] : CString();
+            const auto &caSession = slRouts[1];
+            const auto &caIdentity = slRouts.Count() == 3 ? slRouts[2] : CString();
 
             CAuthorization Authorization;
             if (CheckTokenAuthorization(AConnection, caSession, Authorization)) {
@@ -994,8 +1074,8 @@ namespace Apostol {
 
             auto pRequest = AConnection->Request();
 
-            const auto& caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
-            const auto& caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
+            const auto &caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
+            const auto &caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
 
             if (caSecWebSocketKey.IsEmpty()) {
                 AConnection->SendStockReply(CHTTPReply::bad_request);
@@ -1086,7 +1166,7 @@ namespace Apostol {
                         } else if (wsmRequest.Payload.HasOwnProperty(_T("token"))) {
                             wsmRequest.Action = _T("/api/v1/authorize");
 
-                            const auto& token = wsmRequest.Payload[_T("token")].AsString();
+                            const auto &token = wsmRequest.Payload[_T("token")].AsString();
 
                             if (pSession->Session() != VerifyToken(token))
                                 throw Delphi::Exception::Exception(_T("Token for another session."));
@@ -1113,7 +1193,7 @@ namespace Apostol {
                     }
 
                     if (wsmRequest.MessageTypeId == mtCall) {
-                        const auto& caAuthorization = pSession->Authorization();
+                        const auto &caAuthorization = pSession->Authorization();
 
                         if (caAuthorization.Schema == CAuthorization::asBasic && caAuthorization.Username != pSession->Session()) {
                             throw Delphi::Exception::Exception(_T("Invalid session header value."));
@@ -1196,36 +1276,36 @@ namespace Apostol {
 
             auto decoded = jwt::decode(Token);
 
-            const auto& aud = CString(decoded.get_audience());
-            const auto& alg = CString(decoded.get_algorithm());
-            const auto& iss = CString(decoded.get_issuer());
+            const auto &aud = CString(decoded.get_audience());
+            const auto &alg = CString(decoded.get_algorithm());
+            const auto &iss = CString(decoded.get_issuer());
 
-            const auto& Providers = Server().Providers();
+            const auto &caProviders = Server().Providers();
 
             CString Application;
-            const auto index = OAuth2::Helper::ProviderByClientId(Providers, aud, Application);
+            const auto index = OAuth2::Helper::ProviderByClientId(caProviders, aud, Application);
             if (index == -1)
                 throw COAuth2Error(_T("Not found provider by Client ID."));
 
-            const auto& Provider = Providers[index].Value();
-            const auto& Secret = OAuth2::Helper::GetSecret(Provider, Application);
+            const auto &caProvider = caProviders[index].Value();
+            const auto &caSecret = OAuth2::Helper::GetSecret(caProvider, Application);
 
             CStringList Issuers;
-            Provider.GetIssuers(Application, Issuers);
+            caProvider.GetIssuers(Application, Issuers);
             if (Issuers[iss].IsEmpty())
                 throw jwt::token_verification_exception("Token doesn't contain the required issuer.");
 
             if (alg == "HS256") {
                 auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs256{Secret});
+                        .allow_algorithm(jwt::algorithm::hs256{caSecret});
                 verifier.verify(decoded);
             } else if (alg == "HS384") {
                 auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs384{Secret});
+                        .allow_algorithm(jwt::algorithm::hs384{caSecret});
                 verifier.verify(decoded);
             } else if (alg == "HS512") {
                 auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs512{Secret});
+                        .allow_algorithm(jwt::algorithm::hs512{caSecret});
                 verifier.verify(decoded);
             }
 

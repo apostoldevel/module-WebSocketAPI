@@ -127,6 +127,8 @@ namespace Apostol {
 
             void CheckSession();
 
+            CString VerifyToken(const CString &Token);
+
             static void AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload);
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
@@ -171,10 +173,11 @@ namespace Apostol {
                 return new CWebSocketAPI(AProcess, "websocket api", "module/WebSocketAPI");
             }
 
-            bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);
             int CheckSessionAuthorization(CSession *ASession);
 
-            CString VerifyToken(const CString &Token);
+            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
+            bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);
+            void CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, COnSocketExecuteEvent && OnContinue);
 
             void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
                 const CString &Payload, const CString &Agent, const CString &Host);
