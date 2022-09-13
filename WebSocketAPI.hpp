@@ -57,8 +57,7 @@ namespace Apostol {
         private:
 
             CWebSocketAPI *m_pModule;
-
-            CList m_Sessions;
+            CSession *m_pSession;
 
             CString m_Publisher {};
             CString m_Data {};
@@ -76,15 +75,14 @@ namespace Apostol {
 
         public:
 
-            CObserverHandler(CWebSocketAPI *AModule, const CString &Publisher, const CString &Data, COnObserverHandlerEvent && Handler);
+            CObserverHandler(CWebSocketAPI *AModule, CSession *ASession, const CString &Publisher, const CString &Data, COnObserverHandlerEvent && Handler);
 
             ~CObserverHandler() override;
 
+            CSession *Session() { return m_pSession; }
+
             const CString &Publisher() const { return m_Publisher; }
             const CString &Data() const { return m_Data; }
-
-            CList &Sessions() { return m_Sessions; }
-            const CList &Sessions() const { return m_Sessions; }
 
             bool Allow() const { return m_Allow; };
             void Allow(bool Value) { SetAllow(Value); };
