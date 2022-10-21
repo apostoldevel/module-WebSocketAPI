@@ -666,6 +666,9 @@ namespace Apostol {
             auto OnExecuted = [OnContinue](CPQPollQuery *APollQuery) {
                 auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
+                if (pConnection == nullptr)
+                    return;
+
                 try {
                     auto pResult = APollQuery->Results(0);
 
@@ -681,7 +684,9 @@ namespace Apostol {
 
             auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
                 auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-                ReplyError(pConnection, CHTTPReply::bad_request, E.what());
+                if (pConnection != nullptr) {
+                    ReplyError(pConnection, CHTTPReply::bad_request, E.what());
+                }
             };
 
             auto pRequest = AConnection->Request();
