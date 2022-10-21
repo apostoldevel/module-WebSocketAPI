@@ -661,7 +661,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization,
-                COnSocketExecuteEvent && OnContinue) {
+                COnAuthorizationContinueEvent && OnContinue) {
 
             auto OnExecuted = [OnContinue](CPQPollQuery *APollQuery) {
                 auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
@@ -682,7 +682,7 @@ namespace Apostol {
                     const auto status = ErrorCodeToStatus(CheckError(Payload, ErrorMessage));
 
                     if (status == CHTTPReply::ok) {
-                        OnContinue(pConnection);
+                        OnContinue(pConnection, Payload);
                     } else {
                         ReplyError(pConnection, status, ErrorMessage);
                     }

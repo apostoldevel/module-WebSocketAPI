@@ -98,14 +98,15 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
+        typedef std::function<bool (CTCPConnection *AConnection, const CJSON &Token)> COnAuthorizationContinueEvent;
+        //--------------------------------------------------------------------------------------------------------------
+
         typedef CPollManager CQueueManager;
 
         class CWebSocketAPI: public CApostolModule {
         private:
 
             CDateTime m_CheckDate;
-
-            CSessionManager m_SessionManager;
 
             CQueue m_Queue;
             CQueueManager m_QueueManager;
@@ -135,6 +136,8 @@ namespace Apostol {
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
 
         protected:
+
+            CSessionManager m_SessionManager;
 
             static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
 
@@ -175,7 +178,7 @@ namespace Apostol {
 
             bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
             bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);
-            void CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, COnSocketExecuteEvent && OnContinue);
+            void CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, COnAuthorizationContinueEvent && OnContinue);
 
             void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
                 const CString &Payload, const CString &Agent, const CString &Host);
@@ -212,6 +215,9 @@ namespace Apostol {
 
             CPollManager &QueueManager() { return m_QueueManager; }
             const CPollManager &QueueManager() const { return m_QueueManager; }
+
+            CSessionManager &SessionManager() { return m_SessionManager; }
+            const CSessionManager &SessionManager() const { return m_SessionManager; }
 
         };
     }
