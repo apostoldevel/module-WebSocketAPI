@@ -356,7 +356,7 @@ namespace Apostol {
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
 
-                auto pWSReply = pConnection->WSReply();
+                auto &WSReply = pConnection->WSReply();
 
                 CWSMessage wsmResponse;
 
@@ -394,7 +394,7 @@ namespace Apostol {
                 CString sResponse;
                 CWSProtocol::Response(wsmResponse, sResponse);
 
-                pWSReply->SetPayload(sResponse);
+                WSReply.SetPayload(sResponse);
                 pConnection->SendWebSocket(true);
             }
         }
@@ -405,10 +405,10 @@ namespace Apostol {
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-                auto pWSRequest = pConnection->WSRequest();
-                auto pWSReply = pConnection->WSReply();
+                const auto &caWSRequest = pConnection->WSRequest();
+                auto &WSReply = pConnection->WSReply();
 
-                const CString csRequest(pWSRequest->Payload());
+                const CString csRequest(caWSRequest.Payload());
 
                 CWSMessage wsmRequest;
                 CWSProtocol::Request(csRequest, wsmRequest);
@@ -424,7 +424,7 @@ namespace Apostol {
 
                 CWSProtocol::Response(wsmResponse, sResponse);
 
-                pWSReply->SetPayload(sResponse);
+                WSReply.SetPayload(sResponse);
                 pConnection->SendWebSocket(true);
             }
 
@@ -571,9 +571,9 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        bool CWebSocketAPI::CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization) {
+        bool CWebSocketAPI::CheckAuthorizationData(const CHTTPRequest &Request, CAuthorization &Authorization) {
 
-            const auto &caHeaders = ARequest->Headers;
+            const auto &caHeaders = Request.Headers;
             const auto &caAuthorization = caHeaders.Values(_T("Authorization"));
 
             if (caAuthorization.IsEmpty()) {
@@ -600,10 +600,10 @@ namespace Apostol {
 
         bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization) {
 
-            auto pRequest = AConnection->Request();
+            const auto &caRequest = AConnection->Request();
 
             try {
-                if (CheckAuthorizationData(pRequest, Authorization)) {
+                if (CheckAuthorizationData(caRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
                         VerifyToken(Authorization.Token);
                         return true;
@@ -631,10 +631,10 @@ namespace Apostol {
         bool CWebSocketAPI::CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session,
                 CAuthorization &Authorization) {
 
-            auto pRequest = AConnection->Request();
+            const auto &caRequest = AConnection->Request();
 
             try {
-                if (CheckAuthorizationData(pRequest, Authorization)) {
+                if (CheckAuthorizationData(caRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
                         if (Session != VerifyToken(Authorization.Token))
                             throw Delphi::Exception::Exception(_T("Token for another session."));
@@ -698,10 +698,10 @@ namespace Apostol {
                 }
             };
 
-            auto pRequest = AConnection->Request();
+            const auto &caRequest = AConnection->Request();
 
             try {
-                if (CheckAuthorizationData(pRequest, Authorization)) {
+                if (CheckAuthorizationData(caRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
                         CStringList SQL;
 
@@ -727,11 +727,11 @@ namespace Apostol {
         int CWebSocketAPI::CheckSessionAuthorization(CSession *ASession) {
 
             auto pConnection = ASession->Connection();
-            auto pRequest = pConnection->Request();
+            const auto &caRequest = pConnection->Request();
             auto &Authorization = ASession->Authorization();
 
             try {
-                if (CheckAuthorizationData(pRequest, Authorization)) {
+                if (CheckAuthorizationData(caRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
                         if (ASession->Session() != VerifyToken(Authorization.Token))
                             throw Delphi::Exception::Exception(_T("Token for another session."));
@@ -880,7 +880,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload) {
-            auto pWSReply = AConnection->WSReply();
+            auto &WSReply = AConnection->WSReply();
 
             CWSMessage wsmMessage;
 
@@ -892,7 +892,7 @@ namespace Apostol {
             CString sResponse;
             CWSProtocol::Response(wsmMessage, sResponse);
 
-            pWSReply->SetPayload(sResponse);
+            WSReply.SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
             Log()->Message("[WebSocketAPI] [CALL] [%s] [%s] %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), Payload.c_str());
@@ -903,13 +903,13 @@ namespace Apostol {
             if (AConnection->ClosedGracefully())
                 return;
 
-            auto pWSRequest = AConnection->WSRequest();
-            auto pWSReply = AConnection->WSReply();
+            const auto &caWSRequest = AConnection->WSRequest();
+            auto &WSReply = AConnection->WSReply();
 
             CWSMessage wsmRequest;
             CWSMessage wsmResponse;
 
-            const CString csRequest(pWSRequest->Payload());
+            const CString csRequest(caWSRequest.Payload());
 
             CWSProtocol::Request(csRequest, wsmRequest);
             CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
@@ -919,7 +919,7 @@ namespace Apostol {
             CString sResponse;
             CWSProtocol::Response(wsmResponse, sResponse);
 
-            pWSReply->SetPayload(sResponse);
+            WSReply.SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
             if (Payload.IsEmpty()) {
@@ -935,7 +935,7 @@ namespace Apostol {
             if (AConnection->ClosedGracefully())
                 return;
 
-            auto pWSReply = AConnection->WSReply();
+            auto &WSReply = AConnection->WSReply();
 
             CWSMessage wsmResponse;
 
@@ -947,7 +947,7 @@ namespace Apostol {
             CString sResponse;
             CWSProtocol::Response(wsmResponse, sResponse);
 
-            pWSReply->SetPayload(sResponse);
+            WSReply.SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
             if (Payload.IsEmpty()) {
@@ -964,7 +964,7 @@ namespace Apostol {
             if (AConnection->ClosedGracefully())
                 return;
 
-            auto pWSReply = AConnection->WSReply();
+            auto &WSReply = AConnection->WSReply();
 
             CWSMessage wsmMessage;
 
@@ -979,7 +979,7 @@ namespace Apostol {
             CString sResponse;
             CWSProtocol::Response(wsmMessage, sResponse);
 
-            pWSReply->SetPayload(sResponse);
+            WSReply.SetPayload(sResponse);
             AConnection->SendWebSocket(true);
 
             if (Payload.IsEmpty()) {
@@ -992,9 +992,9 @@ namespace Apostol {
 
         void CWebSocketAPI::DoWS(CHTTPServerConnection *AConnection, const CString &Action) {
 
-            auto pReply = AConnection->Reply();
+            auto &Reply = AConnection->Reply();
 
-            pReply->ContentType = CHTTPReply::json;
+            Reply.ContentType = CHTTPReply::json;
 
             try {
                 if (Action == "list") {
@@ -1023,7 +1023,7 @@ namespace Apostol {
                         jsonArray.Array().Add(jsonSession);
                     }
 
-                    pReply->Content = jsonArray.ToString();
+                    Reply.Content = jsonArray.ToString();
 
                     AConnection->SendReply(CHTTPReply::ok);
                 } else {
@@ -1037,13 +1037,13 @@ namespace Apostol {
 
         void CWebSocketAPI::DoPost(CHTTPServerConnection *AConnection) {
 
-            auto pRequest = AConnection->Request();
-            auto pReply = AConnection->Reply();
+            const auto &caRequest = AConnection->Request();
+            auto &Reply = AConnection->Reply();
 
-            pReply->ContentType = CHTTPReply::json;
+            Reply.ContentType = CHTTPReply::json;
 
             CStringList slRouts;
-            SplitColumns(pRequest->Location.pathname, slRouts, '/');
+            SplitColumns(caRequest.Location.pathname, slRouts, '/');
 
             if (slRouts.Count() < 2) {
                 AConnection->SendStockReply(CHTTPReply::bad_request);
@@ -1060,18 +1060,18 @@ namespace Apostol {
             if (CheckTokenAuthorization(AConnection, caSession, Authorization)) {
                 for (int i = 0; i < m_SessionManager.Count(); ++i) {
                     pSession = m_SessionManager[i];
-                    if ((pSession->Session() == caSession) && (caIdentity.IsEmpty() ? true : pSession->Identity() == caIdentity) && pSession->Authorized()) {
-                        DoCall(pSession->Connection(), "/ws", pRequest->Content);
+                    if ((pSession->Session() == caSession) && (caIdentity.IsEmpty() || pSession->Identity() == caIdentity) && pSession->Authorized()) {
+                        DoCall(pSession->Connection(), "/ws", caRequest.Content);
                         bSent = true;
                     }
                 }
 
-                pReply->Content.Clear();
+                Reply.Content.Clear();
 
                 if (bSent)
-                    pReply->Content = R"({"sent": true, "status": "Success"})";
+                    Reply.Content = R"({"sent": true, "status": "Success"})";
                 else
-                    pReply->Content = R"({"sent": false, "status": "Session not found"})";
+                    Reply.Content = R"({"sent": false, "status": "Session not found"})";
 
                 AConnection->SendReply(CHTTPReply::ok, nullptr, true);
             }
@@ -1080,13 +1080,13 @@ namespace Apostol {
 
         void CWebSocketAPI::DoGet(CHTTPServerConnection *AConnection) {
 
-            auto pRequest = AConnection->Request();
-            auto pReply = AConnection->Reply();
+            const auto &caRequest = AConnection->Request();
+            auto &Reply = AConnection->Reply();
 
-            pReply->ContentType = CHTTPReply::html;
+            Reply.ContentType = CHTTPReply::html;
 
             CStringList slRouts;
-            SplitColumns(pRequest->Location.pathname, slRouts, '/');
+            SplitColumns(caRequest.Location.pathname, slRouts, '/');
 
             if (slRouts.Count() < 2) {
                 AConnection->SendStockReply(CHTTPReply::bad_request);
@@ -1109,10 +1109,10 @@ namespace Apostol {
 
         void CWebSocketAPI::DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity) {
 
-            auto pRequest = AConnection->Request();
+            const auto &caRequest = AConnection->Request();
 
-            const auto &caSecWebSocketKey = pRequest->Headers.Values(_T("Sec-WebSocket-Key"));
-            const auto &caSecWebSocketProtocol = pRequest->Headers.Values(_T("Sec-WebSocket-Protocol"));
+            const auto &caSecWebSocketKey = caRequest.Headers.Values(_T("Sec-WebSocket-Key"));
+            const auto &caSecWebSocketProtocol = caRequest.Headers.Values(_T("Sec-WebSocket-Protocol"));
 
             if (caSecWebSocketKey.IsEmpty()) {
                 AConnection->SendStockReply(CHTTPReply::bad_request);
@@ -1162,8 +1162,8 @@ namespace Apostol {
 
         void CWebSocketAPI::DoWebSocket(CHTTPServerConnection *AConnection) {
 
-            auto pWSRequest = AConnection->WSRequest();
-            const CString csRequest(pWSRequest->Payload());
+            const auto &caWSRequest = AConnection->WSRequest();
+            const CString csRequest(caWSRequest.Payload());
 
             try {
                 if (!AConnection->Connected())

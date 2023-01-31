@@ -139,7 +139,7 @@ namespace Apostol {
 
             CSessionManager m_SessionManager;
 
-            static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
+            static bool CheckAuthorizationData(const CHTTPRequest &Request, CAuthorization &Authorization);
 
             static void DoError(const Delphi::Exception::Exception &E);
 
