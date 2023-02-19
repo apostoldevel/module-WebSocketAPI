@@ -614,9 +614,9 @@ namespace Apostol {
                     AConnection->Data().Values("Authorization", "Basic");
 
                 ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
-            } catch (jwt::token_expired_exception &e) {
+            } catch (jwt::error::token_expired_exception &e) {
                 ReplyError(AConnection, CHTTPReply::forbidden, e.what());
-            } catch (jwt::token_verification_exception &e) {
+            } catch (jwt::error::token_verification_exception &e) {
                 ReplyError(AConnection, CHTTPReply::bad_request, e.what());
             } catch (CAuthorizationError &e) {
                 ReplyError(AConnection, CHTTPReply::bad_request, e.what());
@@ -646,9 +646,9 @@ namespace Apostol {
                     AConnection->Data().Values("Authorization", "Basic");
 
                 ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
-            } catch (jwt::token_expired_exception &e) {
+            } catch (jwt::error::token_expired_exception &e) {
                 ReplyError(AConnection, CHTTPReply::forbidden, e.what());
-            } catch (jwt::token_verification_exception &e) {
+            } catch (jwt::error::token_verification_exception &e) {
                 ReplyError(AConnection, CHTTPReply::bad_request, e.what());
             } catch (CAuthorizationError &e) {
                 ReplyError(AConnection, CHTTPReply::bad_request, e.what());
@@ -742,9 +742,9 @@ namespace Apostol {
                     return 1;
                 }
                 return -1;
-            } catch (jwt::token_expired_exception &e) {
+            } catch (jwt::error::token_expired_exception &e) {
                 ReplyError(pConnection, CHTTPReply::forbidden, e.what());
-            } catch (jwt::token_verification_exception &e) {
+            } catch (jwt::error::token_verification_exception &e) {
                 ReplyError(pConnection, CHTTPReply::bad_request, e.what());
             } catch (CAuthorizationError &e) {
                 ReplyError(pConnection, CHTTPReply::bad_request, e.what());
@@ -1248,8 +1248,10 @@ namespace Apostol {
                             PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.IsNull() ? CString() : wsmRequest.Payload.ToString(), pSession);
                         }
                     }
-                } catch (jwt::token_expired_exception &e) {
+                } catch (jwt::error::token_expired_exception &e) {
                     DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::forbidden, e.what());
+                } catch (jwt::error::token_verification_exception &e) {
+                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e.what(), csRequest);
                 } catch (CAuthorizationError &e) {
                     DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e.what());
                 } catch (std::exception &e) {
@@ -1330,7 +1332,7 @@ namespace Apostol {
             CStringList Issuers;
             Provider.GetIssuers(Application, Issuers);
             if (Issuers[iss].IsEmpty())
-                throw jwt::token_verification_exception("Token doesn't contain the required issuer.");
+                throw jwt::error::token_verification_exception(jwt::error::token_verification_error::issuer_missmatch);
 
             if (alg == "HS256") {
                 auto verifier = jwt::verify()
