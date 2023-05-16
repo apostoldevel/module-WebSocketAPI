@@ -525,13 +525,13 @@ namespace Apostol {
 
             CString sData;
 
-            const auto &caNonce = LongToString(MsEpoch() * 1000);
+            const auto &caNonce = CString::ToString(MsEpoch() * 1000);
 
             sData = Action;
             sData << caNonce;
             sData << (Payload.IsEmpty() || Payload == "{}" || Payload == "[]" ? _T("null") : Payload);
 
-            const auto &caSignature = ASession->Secret().IsEmpty() ? _T("") : hmac_sha256(ASession->Secret(), sData);
+            const auto &caSignature = ASession->Secret().IsEmpty() ? _T("") : HMAC_SHA256(ASession->Secret(), sData);
 
             SignedFetch(AConnection, UniqueId, Action, Payload, ASession->Session(), caNonce, caSignature, ASession->Agent(), ASession->IP());
         }
