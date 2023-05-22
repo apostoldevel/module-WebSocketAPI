@@ -531,7 +531,7 @@ namespace Apostol {
             sData << caNonce;
             sData << (Payload.IsEmpty() || Payload == "{}" || Payload == "[]" ? _T("null") : Payload);
 
-            const auto &caSignature = ASession->Secret().IsEmpty() ? _T("") : HMAC_SHA256(ASession->Secret(), sData);
+            const auto &caSignature = ASession->Secret().IsEmpty() ? _T("") : HMAC_SHA256(ASession->Secret(), sData, true);
 
             SignedFetch(AConnection, UniqueId, Action, Payload, ASession->Session(), caNonce, caSignature, ASession->Agent(), ASession->IP());
         }
