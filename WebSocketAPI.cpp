@@ -315,13 +315,14 @@ namespace Apostol {
         void CWebSocketAPI::UnloadQueue() {
             const auto index = m_Queue.IndexOf(this);
             if (index != -1) {
-                const auto queue = m_Queue[index];
-                for (int i = 0; i < queue->Count(); ++i) {
-                    auto pHandler = (CObserverHandler *) queue->Item(i);
-                    if (pHandler != nullptr) {
+                const auto pQueue = m_Queue[index];
+                for (int i = 0; i < pQueue->Count(); ++i) {
+                    auto pHandler = (CObserverHandler *) pQueue->Item(i);
+                    if (pHandler != nullptr && pHandler->Allow()) {
                         pHandler->Handler();
-                        if (m_Progress >= m_MaxQueue)
+                        if (m_Progress >= m_MaxQueue) {
                             break;
+                        }
                     }
                 }
             }
