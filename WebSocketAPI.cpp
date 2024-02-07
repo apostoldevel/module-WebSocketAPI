@@ -30,6 +30,7 @@ Author:
 #include "jwt.h"
 //----------------------------------------------------------------------------------------------------------------------
 
+#define PG_LISTEN_CONF "helper"
 #define PG_LISTEN_NAME "daemon.init_listen()"
 //----------------------------------------------------------------------------------------------------------------------
 
@@ -1383,7 +1384,7 @@ namespace Apostol {
             SQL.Add("SELECT " PG_LISTEN_NAME ";");
 
             try {
-                ExecSQL(SQL, nullptr, OnExecuted, OnException);
+                ExecSQL(SQL, nullptr, OnExecuted, OnException, PG_LISTEN_CONF);
             } catch (Delphi::Exception::Exception &E) {
                 DoError(E);
             }
@@ -1391,7 +1392,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::CheckListen() {
-            if (!PQClient().CheckListen(PG_LISTEN_NAME))
+            if (!PQClient(PG_LISTEN_CONF).CheckListen(PG_LISTEN_NAME))
                 InitListen();
         }
         //--------------------------------------------------------------------------------------------------------------
