@@ -79,7 +79,7 @@ namespace Apostol {
 
             ~CObserverHandler() override;
 
-            CSession *Session() { return m_pSession; }
+            CSession *Session() const { return m_pSession; }
 
             const CString &Publisher() const { return m_Publisher; }
             const CString &Data() const { return m_Data; }

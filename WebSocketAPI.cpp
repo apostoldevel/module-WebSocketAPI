@@ -88,7 +88,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         CObserverHandler::~CObserverHandler() {
-            Close();
+            CObserverHandler::Close();
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -269,7 +269,7 @@ namespace Apostol {
 
         void CWebSocketAPI::CheckSession() {
             for (int i = 0; i < m_SessionManager.Count(); ++i) {
-                auto pSession = m_SessionManager[i];
+                const auto pSession = m_SessionManager[i];
                 if (pSession->Connection() != nullptr) {
                     if (pSession->Connection()->ClosedGracefully()) {
                         DeleteSession(pSession);
@@ -318,7 +318,7 @@ namespace Apostol {
             if (index != -1) {
                 const auto pQueue = m_Queue[index];
                 for (int i = 0; i < pQueue->Count(); ++i) {
-                    auto pHandler = (CObserverHandler *) pQueue->Item(i);
+                    const auto pHandler = (CObserverHandler *) pQueue->Item(i);
                     if (pHandler != nullptr && pHandler->Allow()) {
                         pHandler->Handler();
                         if (m_Progress >= m_MaxQueue) {
@@ -347,14 +347,14 @@ namespace Apostol {
 
         void CWebSocketAPI::DoPostgresQueryExecuted(CPQPollQuery *APollQuery) {
 
-            auto pResult = APollQuery->Results(0);
+            const auto pResult = APollQuery->Results(0);
 
             if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                 QueryException(APollQuery, Delphi::Exception::EDBError(pResult->GetErrorMessage()));
                 return;
             }
 
-            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+            const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
 
@@ -404,7 +404,7 @@ namespace Apostol {
 
         void CWebSocketAPI::QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
 
-            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+            const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
             if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
                 const auto &caWSRequest = pConnection->WSRequest();
@@ -459,7 +459,7 @@ namespace Apostol {
             AConnection->Data().Values("signature", "false");
 
             try {
-                auto pQuery = ExecSQL(SQL, AConnection);
+                const auto pQuery = ExecSQL(SQL, AConnection);
                 pQuery->Data().Values(_T("UniqueId"), UniqueId);
                 pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
@@ -513,7 +513,7 @@ namespace Apostol {
             AConnection->Data().Values("signature", "false");
 
             try {
-                auto pQuery = ExecSQL(SQL, AConnection);
+                const auto pQuery = ExecSQL(SQL, AConnection);
                 pQuery->Data().Values(_T("UniqueId"), UniqueId);
                 pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
@@ -525,11 +525,9 @@ namespace Apostol {
         void CWebSocketAPI::PreSignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
                 const CString &Action, const CString &Payload, CSession *ASession) {
 
-            CString sData;
-
             const auto &caNonce = CString::ToString(MsEpoch() * 1000);
 
-            sData = Action;
+            CString sData = Action;
             sData << caNonce;
             sData << (Payload.IsEmpty() || Payload == "{}" || Payload == "[]" ? _T("null") : Payload);
 
@@ -564,7 +562,7 @@ namespace Apostol {
             AConnection->Data().Values("signature", "true");
 
             try {
-                auto pQuery = ExecSQL(SQL, AConnection);
+                const auto pQuery = ExecSQL(SQL, AConnection);
                 pQuery->Data().Values(_T("UniqueId"), UniqueId);
                 pQuery->Data().Values(_T("Action"), Action);
             } catch (Delphi::Exception::Exception &E) {
@@ -666,13 +664,13 @@ namespace Apostol {
                 COnAuthorizationContinueEvent && OnContinue) {
 
             auto OnExecuted = [OnContinue](CPQPollQuery *APollQuery) {
-                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+                const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
                 if (pConnection == nullptr)
                     return;
 
                 try {
-                    auto pResult = APollQuery->Results(0);
+                    const auto pResult = APollQuery->Results(0);
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
@@ -694,7 +692,7 @@ namespace Apostol {
             };
 
             auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+                const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
                 if (pConnection != nullptr) {
                     ReplyError(pConnection, CHTTPReply::bad_request, E.what());
                 }
@@ -708,6 +706,20 @@ namespace Apostol {
                         CStringList SQL;
 
                         SQL.Add(CString().Format("SELECT daemon.validation(%s);", PQQuoteLiteral(Authorization.Token).c_str()));
+                        ExecSQL(SQL, AConnection, OnExecuted, OnException);
+
+                        return;
+                    }
+
+                    if (Authorization.Schema == CAuthorization::asBasic) {
+                        CStringList SQL;
+
+                        SQL.Add(CString().Format("SELECT daemon.authorized_fetch(%s, %s, 'POST', '/api/v1/sign/in', '%s'::jsonb);",
+                                PQQuoteLiteral(Authorization.Username).c_str(),
+                                PQQuoteLiteral(Authorization.Password).c_str(),
+                                CString().Format(R"({"username": "%s", "password": "%s"})", Authorization.Username.c_str(), Authorization.Password.c_str()).c_str()
+                            ));
+
                         ExecSQL(SQL, AConnection, OnExecuted, OnException);
 
                         return;
@@ -728,7 +740,7 @@ namespace Apostol {
 
         int CWebSocketAPI::CheckSessionAuthorization(CSession *ASession) {
 
-            auto pConnection = ASession->Connection();
+            const auto pConnection = ASession->Connection();
             const auto &caRequest = pConnection->Request();
             auto &Authorization = ASession->Authorization();
 
@@ -762,30 +774,30 @@ namespace Apostol {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
 
-                auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
+                const auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
 
                 if (pHandler == nullptr) {
                     return;
                 }
 
-                auto Session = pHandler->Session();
+                const auto pSession = pHandler->Session();
 
-                if (Session == nullptr) {
+                if (pSession == nullptr) {
                     DeleteHandler(pHandler);
                     return;
                 }
 
-                if (!Session->Authorized()) {
+                if (!pSession->Authorized()) {
                     DeleteHandler(pHandler);
                     return;
                 }
 
-                if (Session->Connection() == nullptr) {
+                if (pSession->Connection() == nullptr) {
                     DeleteHandler(pHandler);
                     return;
                 }
 
-                if (Session->Connection()->ClosedGracefully()) {
+                if (pSession->Connection()->ClosedGracefully()) {
                     DeleteHandler(pHandler);
                     return;
                 }
@@ -793,7 +805,7 @@ namespace Apostol {
                 CHTTPReply::CStatusType status = CHTTPReply::internal_server_error;
 
                 try {
-                    auto pResult = APollQuery->Results(0);
+                    const auto pResult = APollQuery->Results(0);
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
@@ -805,10 +817,10 @@ namespace Apostol {
 
                         status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
                         if (status == CHTTPReply::unauthorized) {
-                            Session->Session().Clear();
-                            Session->Secret().Clear();
-                            Session->Authorization().Clear();
-                            Session->Authorized(false);
+                            pSession->Session().Clear();
+                            pSession->Secret().Clear();
+                            pSession->Authorization().Clear();
+                            pSession->Authorized(false);
                         }
 
                         if (status != CHTTPReply::ok) {
@@ -819,51 +831,51 @@ namespace Apostol {
                     if (pResult->nTuples() != 0) {
                         CString jsonString;
                         PQResultToJson(pResult, jsonString);
-                        DoCall(Session->Connection(), "/" + pHandler->Publisher(), jsonString);
+                        DoCall(pSession->Connection(), "/" + pHandler->Publisher(), jsonString);
                     }
                 } catch (Delphi::Exception::Exception &E) {
-                    DoError(Session->Connection(), CString(), CString(), status, E.what());
+                    DoError(pSession->Connection(), CString(), CString(), status, E.what());
                 }
 
                 DeleteHandler(pHandler);
             };
 
             auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
+                const auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
                 if (pHandler != nullptr) {
-                    auto Session = pHandler->Session();
-                    if (Session != nullptr && !Session->Connection()->ClosedGracefully()) {
-                        DoError(Session->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E.what());
+                    const auto pSession = pHandler->Session();
+                    if (pSession != nullptr && !pSession->Connection()->ClosedGracefully()) {
+                        DoError(pSession->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E.what());
                     }
                     DeleteHandler(pHandler);
                 }
             };
 
-            auto Session = AHandler->Session();
+            const auto pSession = AHandler->Session();
 
-            if (Session == nullptr) {
+            if (pSession == nullptr) {
                 DeleteHandler(AHandler);
                 return;
             }
 
-            if (!Session->Authorized()) {
+            if (!pSession->Authorized()) {
                 DeleteHandler(AHandler);
                 return;
             }
 
-            if (Session->Connection() == nullptr) {
+            if (pSession->Connection() == nullptr) {
                 DeleteHandler(AHandler);
                 return;
             }
 
-            if (Session->Connection()->ClosedGracefully()) {
+            if (pSession->Connection()->ClosedGracefully()) {
                 DeleteHandler(AHandler);
                 return;
             }
 
             CStringList SQL;
 
-            api::observer(SQL, AHandler->Publisher(), Session->Session(), Session->Identity(), AHandler->Data(), Session->Agent(), Session->IP());
+            api::observer(SQL, AHandler->Publisher(), pSession->Session(), pSession->Identity(), AHandler->Data(), pSession->Agent(), pSession->IP());
 
             try {
                 ExecSQL(SQL, AHandler, OnExecuted, OnException);
@@ -1006,7 +1018,7 @@ namespace Apostol {
                         CJSONValue jsonSession(jvtObject);
                         CJSONValue jsonConnection(jvtObject);
 
-                        auto pSession = m_SessionManager[i];
+                        const auto pSession = m_SessionManager[i];
 
                         jsonSession.Object().AddPair("session", pSession->Session());
                         jsonSession.Object().AddPair("identity", pSession->Identity());
@@ -1052,17 +1064,16 @@ namespace Apostol {
                 return;
             }
 
-            CSession *pSession;
-            bool bSent = false;
-
             const auto &caSession = slRouts[1];
             const auto &caIdentity = slRouts.Count() == 3 ? slRouts[2] : CString();
 
             CAuthorization Authorization;
             if (CheckTokenAuthorization(AConnection, caSession, Authorization)) {
+                bool bSent = false;
+
                 for (int i = 0; i < m_SessionManager.Count(); ++i) {
-                    pSession = m_SessionManager[i];
-                    if ((pSession->Session() == caSession) && (caIdentity.IsEmpty() || pSession->Identity() == caIdentity) && pSession->Authorized()) {
+                    const auto pSession = m_SessionManager[i];
+                    if (pSession->Session() == caSession && (caIdentity.IsEmpty() || pSession->Identity() == caIdentity) && pSession->Authorized()) {
                         DoCall(pSession->Connection(), "/ws", caRequest.Content);
                         bSent = true;
                     }
@@ -1125,7 +1136,7 @@ namespace Apostol {
             const CString csProtocol(caSecWebSocketProtocol.IsEmpty() ? "" : caSecWebSocketProtocol.SubString(0, caSecWebSocketProtocol.Find(',')));
 
 #ifdef WS_ONE_SESSION
-            auto pSession = m_SessionManager.Find(Session, Identity);
+            const auto pSession = m_SessionManager.Find(Session, Identity);
 
             if (pSession == nullptr) {
                 pSession = m_SessionManager.Add(AConnection);
@@ -1135,7 +1146,7 @@ namespace Apostol {
                 pSession->SwitchConnection(AConnection);
             }
 #else
-            auto pSession = m_SessionManager.Add(AConnection);
+            const auto pSession = m_SessionManager.Add(AConnection);
 
             pSession->Session() = Session;
             pSession->Identity() = Identity;
@@ -1174,7 +1185,7 @@ namespace Apostol {
                 CWSMessage wsmRequest;
                 CWSMessage wsmResponse;
 
-                auto pSession = dynamic_cast<CSession *> (AConnection->Object());
+                const auto pSession = dynamic_cast<CSession *> (AConnection->Object());
 
                 try {
                     CWSProtocol::Request(csRequest, wsmRequest);
@@ -1269,11 +1280,11 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CWebSocketAPI::DoSessionDisconnected(CObject *Sender) {
-            auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
+            const auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
             if (pConnection != nullptr) {
-                auto pSession = m_SessionManager.FindByConnection(pConnection);
+                const auto pSession = m_SessionManager.FindByConnection(pConnection);
                 if (pSession != nullptr) {
-                    auto pSocket = pConnection->Socket()->Binding();
+                    const auto pSocket = pConnection->Socket()->Binding();
                     if (pSocket != nullptr) {
                         Log()->Notice(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
                                       pSocket->PeerIP(), pSocket->PeerPort(),
@@ -1283,7 +1294,7 @@ namespace Apostol {
                     pSession->SwitchConnection(nullptr);
                     DeleteSession(pSession);
                 } else {
-                    auto pSocket = pConnection->Socket()->Binding();
+                    const auto pSocket = pConnection->Socket()->Binding();
                     if (pSocket != nullptr) {
                         Log()->Notice(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
                                       pSocket->PeerIP(), pSocket->PeerPort()
@@ -1358,7 +1369,7 @@ namespace Apostol {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
                 try {
-                    auto pResult = APollQuery->Results(0);
+                    const auto pResult = APollQuery->Results(0);
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
                         throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
@@ -1399,7 +1410,7 @@ namespace Apostol {
 
         void CWebSocketAPI::Heartbeat(CDateTime DateTime) {
             CApostolModule::Heartbeat(DateTime);
-            if ((DateTime >= m_CheckDate)) {
+            if (DateTime >= m_CheckDate) {
                 m_CheckDate = DateTime + (CDateTime) 1 / MinsPerDay; // 1 min
                 CheckListen();
                 CheckSession();
