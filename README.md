@@ -1,617 +1,634 @@
 WebSocket API
 -
-**Модуль** для [Апостол CRM](https://github.com/apostoldevel/apostol-crm).
 
-Описание
--
-* **WebSocket API** предоставляет возможность подключения к API системы по протоколу [WebSocket](https://ru.wikipedia.org/wiki/WebSocket).
+[![ru](https://img.shields.io/badge/lang-ru-green.svg)](https://github.com/apostoldevel/module-WebSocketAPI/blob/master/README.ru-RU.md)
 
-Установка
--
-Следуйте указаниям по сборке и установке [Апостол CRM](https://github.com/apostoldevel/apostol-crm#%D1%81%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-%D0%B8-%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0)
+A **Worker module** for [Apostol](https://github.com/apostoldevel/apostol).
 
-Описание
+Description
 -
 
-## Запрос клиента
+**WebSocket API** provides real-time WebSocket connectivity to the API. It implements a lightweight JSON-based RPC protocol over WebSocket, an event subscription system (Observer pattern), and a REST endpoint for pushing data to connected clients.
 
-Чтобы установить с сервером соединение WebSocket, клиентское приложение должно выполнить «Рукопожатие» («Opening Handshake»), как описано в [RFC6455](https://tools.ietf.org/html/rfc6455) [раздел 4](https://tools.ietf.org/html/rfc6455#section-4).
+Database module
+-
 
-Сервер накладывает дополнительные ограничения на URL-адрес и подпротокол WebSocket, подробно описанные ниже.
+WebSocketAPI is tightly coupled to the **`observer`**, **`notification`**, **`notice`**, **`message`**, and **`log`** modules of [db-platform](https://github.com/apostoldevel/db-platform).
 
-### URL подключения
+The C++ module handles WebSocket transport and session routing. All subscription state, publisher registration, and event data live entirely in the database:
 
-Чтобы инициировать соединение WebSocket, клиенту требуется URL-адрес [RFC3986](https://tools.ietf.org/html/rfc3986) для подключения (URL подключения).
+| db-platform module | Purpose |
+|--------------------|---------|
+| `observer` | Publisher/subscriber registry: stores publishers (`observer.publisher`) and active listener subscriptions (`observer.listener`) per session |
+| `notification` | Source of `notify` publisher events — fires whenever a user interacts with a system object (create/update/delete/transition) |
+| `notice` | Source of `notice` publisher events — system-level notices grouped by category |
+| `message` | Source of `message` publisher events — inbox and outbox message records from the `message` entity |
+| `log` | Source of `log` publisher events — event log entries (M/W/E/D) from the system log |
 
-[Взаимодействие с системой](https://github.com/apostoldevel/module-AppServer#%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF-%D0%BA-api) происходит в рамках ранее созданной сессии. Сессия создается после успешной аутентификации пользователя в системе. Результатом которой является получение маркера доступа, идентификатора сессии и секретного ключа.
+Key database objects:
 
-URL подключения содержит в себе код сессии и идентификатор сеанса связи.
+| Object | Purpose |
+|--------|---------|
+| `observer.publisher` | Registered publishers (`notify`, `notice`, `message`, `log`, `geo`) |
+| `observer.listener` | Active subscriptions: session → publisher with filter and params |
+| `api.observer_subscribe(publisher, filter, params)` | Creates or updates a listener for the current session |
+| `api.observer_unsubscribe(publisher)` | Removes the listener for the current session |
+| `api.observer_publisher(code)` | Returns publisher metadata |
+| `api.observer_listener(publisher, session)` | Returns listener state for a session |
 
-Формат URL подключения:
-````
-ws[s]://[ws.]exemple.com/session/<code>[/<identity>]
-````
-* Где:
-  `<code>` - **Обязательный**. Код сессии (40 символов);
-  `<identity>` - **Необязательный**. Идентификатор сеанса связи в рамках сессии. Используется для установки нескольких соединений к одной сессии.
+Configuration
+-
 
-Пример:
-````
-wss://ws.exemple.com/session/c83b2f85321f95341707624546ca6ac4fa6d1115
-````
+```ini
+[module/WebSocketAPI]
+enable=true
+```
 
-````
-wss://ws.exemple.com/session/c83b2f85321f95341707624546ca6ac4fa6d1115/user1
-````
+Installation
+-
 
-## RPC framework
+Follow the build and installation instructions for [Apostol](https://github.com/apostoldevel/apostol#building-and-installation).
 
-Протокол WebSocket сам по себе не дает возможности отправлять сообщения в режиме запрос/ответ. Чтобы обеспечить эту возможность был создан небольшой RPC протокол поверх WebSocket в формате JSON.
+Client Connection
+-
 
-### Описание JSON ключей
+To establish a WebSocket connection the client must perform an Opening Handshake as described in [RFC 6455, Section 4](https://tools.ietf.org/html/rfc6455#section-4).
 
-Ключ | Расшифровка | Тип данных | Назначение, примечания
------ | ----------- | ---------- | ----------------------
-t | MessageTypeId | INTEGER | Тип сообщения. Описание ниже.
-u | UniqueId | UUID | Уникальный идентификатор сообщения. Если сообщение от сервера является ответом на запрос от клиента, то UniqueId будет одинаковым.
-a | Action | STRING | Действие (маршрут к конечной точке API).
-c | ErrorCode | INTEGER | Код ошибки.
-m | ErrorMessage | STRING |  Сообщение об ошибке.
-p | Payload | JSON | Полезная нагрузка.
+The server imposes additional constraints on the WebSocket URL, described below.
 
-### Тип сообщения (MessageTypeId):
+### Connection URL
 
-Тип сообщения | Номер типа сообщения | Направление | Описание
------ | ----------- | ---------- | ----------------------
-OPEN | 0 | Клиент -> Сервер | Авторизация. Открытие ранее созданной сессии.
-CLOSE | 1 | Клиент -> Сервер | Закрытие сессии (выход из системы).
-CALL | 2 | Клиент <-> Сервер | Запрос.
-CALLRESULT | 3 | Сервер -> Клиент | Ответ на запрос.
-CALLERROR | 4 | Сервер -> Клиент | Ответ на запрос с ошибкой.
+The WebSocket connection is scoped to a previously created session. A session is created after successful user authentication, which yields an access token, a session code, and a secret key.
 
-## Авторизация
+The connection URL contains the session code and an optional identity that distinguishes multiple connections within the same session.
 
-* После подключения клиенты нужно авторизоваться.
+URL format:
 
-Авторизация может быть выполнена в автоматическом режиме при условии, если в момент установки связи были указаны соответствующие HTTP-заголовки:
+```
+ws[s]://[ws.]example.com/session/<code>[/<identity>]
+```
 
-- `Authorization: Bearer <token>`
+Where:
+- `<code>` — **Required.** Session code (40 characters).
+- `<identity>` — **Optional.** Connection identity within the session. Used to maintain multiple simultaneous connections to the same session.
 
-Или:
+Examples:
 
-- `Session: <session>`
-- `Secret: <secret>`
+```
+wss://ws.example.com/session/c83b2f85321f95341707624546ca6ac4fa6d1115
+```
 
-Если заполнение HTTP-заголовков блокируется на стороне используемого, клиентским приложением, фрейворком, то авторизация выполняется путем отправки пакета `OPEN` с данными авторизации (которые выдал [сервер авторизации](https://github.com/apostoldevel/module-AuthServer)) это может быть или маркер доступа (`token`) или секретный код сессии `secret`.
+```
+wss://ws.example.com/session/c83b2f85321f95341707624546ca6ac4fa6d1115/user1
+```
 
-После успешной авторизации Вы сможете отправлять API запросы с типом сообщения `CALL`. Где маршрут к конечной точке API указывается в ключе `Action`, а JSON тело запроса в ключе `Payload`.
+RPC Protocol
+-
 
-Попытка отправить запрос до выполнения успешной процедуры авторизации приведет к ответу с типом сообщения `CALLERROR`:
+The WebSocket protocol itself does not provide request/response semantics. To enable this, a small JSON-based RPC protocol is layered on top of WebSocket.
 
-**Пример:**
+### JSON Frame Fields
 
-Если код сессии указан не верно или сессия была закрыта то ответ будет с типом сообщения `CALLERROR`:
-````json
-{"t":4,"u":"<uuid>","c":400,"m":"Код сессии не найден."}
-````
+Key | Name | Type | Description
+--- | ---- | ---- | -----------
+`t` | MessageTypeId | INTEGER | Message type (see below).
+`u` | UniqueId | UUID | Unique message identifier. When a server message is a reply to a client request, both share the same UniqueId.
+`a` | Action | STRING | API endpoint route.
+`c` | ErrorCode | INTEGER | Error code.
+`m` | ErrorMessage | STRING | Error description.
+`p` | Payload | JSON | Message payload.
 
-Авторизация по секретному коду сессии:
-````json
+### Message Types (MessageTypeId)
+
+Type | Number | Direction | Description
+---- | ------ | --------- | -----------
+`OPEN` | 0 | Client → Server | Authorize an existing session.
+`CLOSE` | 1 | Client → Server | Close the session (sign out).
+`CALL` | 2 | Client ↔ Server | Request or server-initiated push.
+`CALLRESULT` | 3 | Server → Client | Successful response to a `CALL`.
+`CALLERROR` | 4 | Server → Client | Error response to a `CALL`.
+
+Authorization
+-
+
+After connecting, the client must authorize before sending API requests.
+
+Authorization can be performed automatically during the handshake if the following HTTP headers are provided:
+
+```
+Authorization: Bearer <token>
+```
+
+Or:
+
+```
+Session: <session>
+Secret: <secret>
+```
+
+If the client framework prevents setting custom HTTP headers during the WebSocket handshake, authorization is performed by sending an `OPEN` message with credentials issued by the [AuthServer](https://github.com/apostoldevel/module-AuthServer). Either an access token (`token`) or a session secret (`secret`) may be used.
+
+After successful authorization, `CALL` messages can be sent. The API endpoint is specified in the `Action` field (`a`) and the JSON request body in the `Payload` field (`p`).
+
+Attempting to send a `CALL` before authorization results in a `CALLERROR` response.
+
+**Example — session code not found or session closed:**
+
+```json
+{"t":4,"u":"<uuid>","c":400,"m":"Session code not found."}
+```
+
+### Authorization via secret key
+
+Request:
+
+```json
 {"t":0,"u":"<uuid>","p":{"secret": "MWCJ14k/RJyiHskQB8DoVbliiwDeNGKsgsAMugp3OZt+M0Zj44hDykwRuFoWEwuG"}}
-````
+```
 
-Положительный ответ:
-````json
-{"t":3,"u":"<uuid>","p":{"authorized": true, "code": "amAJmzkxvDE+ad7KwkRtZU1qkUod+3XuycBbxRqHOOjBdeOkkR+lSExI4L8LAcb+", "message": "Успешно."}}
-````
-* Где:
-  `code` - Новый [код авторизации](https://github.com/apostoldevel/module-AuthServer#%D0%BA%D0%BE%D0%B4-%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D0%B8) на получение маркера доступа (не путать с секретным кодом сессии).
+Success response:
 
-Отрицательный ответ:
-````json
-{"t":4,"u":"<uuid>","c":401,"m":"Выход из системы. Секретный код сессии не прошёл проверку."}
-````
-**ВНИМАНИЕ**: При передаче неверных данных авторизации сессия будет закрыта, но не соединение.
+```json
+{"t":3,"u":"<uuid>","p":{"authorized": true, "code": "amAJmzkxvDE+ad7KwkRtZU1qkUod+3XuycBbxRqHOOjBdeOkkR+lSExI4L8LAcb+", "message": "Success."}}
+```
 
-Авторизация по маркеру доступа:
-````json
+Where `code` is a new [authorization code](https://github.com/apostoldevel/module-AuthServer) for obtaining an access token (not to be confused with the session secret).
+
+Error response:
+
+```json
+{"t":4,"u":"<uuid>","c":401,"m":"Sign out. Session secret failed verification."}
+```
+
+**Note:** If incorrect authorization credentials are supplied, the session is closed but the WebSocket connection remains open.
+
+### Authorization via access token
+
+Request:
+
+```json
 {"t":0,"u":"<uuid>","p":{"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiIDogImFjY291bnRzLnBsdWdtZS5ydSIsICJhdWQiIDogInNlcnZpY2UtcGx1Z21lLnJ1IiwgInN1YiIgOiAiYzgzYjJmODUzMjFmOTUzNDE3MDc2MjQ1NDZjYTZhYzRmYTZkMTExNSIsICJpYXQiIDogMTYwNjIxMDcwNiwgImV4cCIgOiAxNjA2MjE0MzA2fQ.ZI82FKXAgA1CZm3gx9XCpgpq_WyZJvwqYI4nOdccVts"}}
-````
-**ВНИМАНИЕ**: Не забывайте, что маркер доступа имеет ограниченный срок жизни.
+```
 
-Положительный ответ:
-````json
-{"t":3,"u":"<uuid>","p":{"authorized": true, "message": "Успешно."}}
-````
+**Note:** Access tokens have a limited lifetime.
 
-Отрицательный ответ:
-````json
+Success response:
+
+```json
+{"t":3,"u":"<uuid>","p":{"authorized": true, "message": "Success."}}
+```
+
+Error response:
+
+```json
 {"t":4,"u":"<uuid>","c":403,"m":"Verification failed: Token expired."}
-````
+```
 
-## Передача данных
+Pushing Data to Clients
+-
 
-Предусмотрена возможность отправки произвольных данных клиентскому приложению подключенному по WebSocket.
+Arbitrary data can be pushed to a connected WebSocket client via a REST API call:
 
-Для этого нужно отправить на сервер REST API запрос:
-
-```http request
+```
 POST /ws/<code>[/<identity>]
 
 <anydata>
 ```
 
-* Где:
-  - `<code>` - **Обязательный**. Код сессии WebSocket соединения на которое необходимо передать данные;
-  - `<identity>` - **Необязательный**. Идентификатор сеанса связи в рамках сессии (при наличии);
-  - `<anydata>` - **Необязательный**. Любые данные в произвольном формате.
+Where:
+- `<code>` — **Required.** Session code of the target WebSocket connection.
+- `<identity>` — **Optional.** Connection identity within the session (if applicable).
+- `<anydata>` — **Optional.** Any data in any format.
 
-Данные будут отправлены запросом с типом сообщения `CALL` в `Action` будет указано значение `/ws` в `Payload` будут произвольные данные из REST API запроса.
+The data is delivered to the client as a `CALL` message with `Action` set to `/ws` and `Payload` containing the body of the REST request.
 
-Пример:
-````http request
+**Example request:**
+
+```http
 POST /ws/8c98085f34c83a0eea5f40791218fbf80f1858d3 HTTP/1.1
 Host: localhost:8080
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.[...].9GI82ffkIhbUeWR8if3a8q78nfXAL4AFOMp3kWDTHOA
 Content-Type: application/json
 
 {"anydata":null}
-````
+```
 
-Положительный ответ:
-````json
+Success response:
+
+```json
 {"sent": true, "status": "Success"}
-````
+```
 
-Отрицательный ответ:
-````json
+Error response:
+
+```json
 {"sent": false, "status": "Session not found"}
-````
+```
 
-## Подписка на события
+Event Subscription
+-
 
-* Для того чтобы получать данные от сервера без предварительных запросов со стороны клиентского приложения нужно подписаться на события.
+To receive server-initiated data without polling, a client subscribes to events from a **publisher**.
 
-* Для того чтобы подписаться на события нужно выбрать _издателя_ и настроить _слушателя_ (установить фильтр и параметры).
+To subscribe, choose a publisher and configure a listener (filter and parameters).
 
-# Издатели
+Publishers
+-
 
-## Уведомления (`notify`)
+## Notifications (`notify`)
 
-Издатель `notify` предоставляет возможность подписаться на системные события, которые возникают каждый раз, когда пользователь системы взаимодействует с тем или иным объектом.
+The `notify` publisher delivers system events that are raised whenever a user interacts with an object in the system.
 
-### Фильтр
-
-Представление JSON для фильтра отбора событий:
+### Filter
 
 ```json
 {
-  "entities": enum (string),
-  "classes": enum (string),
-  "actions": enum (string),
-  "methods": enum (string),
-  "objects": enum (numeric)
+  "entities": ["<code>", ...],
+  "classes":  ["<code>", ...],
+  "actions":  ["<code>", ...],
+  "methods":  ["<code>", ...],
+  "objects":  [<id>, ...]
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-entities | JSON array | Коды | **Необязательный**. Сущность. Массив кодов.
-classes  | JSON array | Коды | **Необязательный**. Класс. Массив кодов.
-actions  | JSON array | Коды | **Необязательный**. Действие. Массив кодов.
-methods  | JSON array | Коды | **Необязательный**. Метод. Массив кодов.
-objects  | JSON array | Идентификаторы | **Необязательный**. Объекты. Массив идентификаторов.
+Field | Type | Description
+----- | ---- | -----------
+`entities` | JSON array of strings | **Optional.** Entity codes.
+`classes` | JSON array of strings | **Optional.** Class codes.
+`actions` | JSON array of strings | **Optional.** Action codes.
+`methods` | JSON array of strings | **Optional.** Method codes.
+`objects` | JSON array of integers | **Optional.** Object IDs.
 
-**ВАЖНО**: Фильтр по полям работает по условию `И`, по значением в поле по условию `ИЛИ`.
+**Important:** Fields are combined with AND logic; multiple values within a field use OR logic. Fields with no values specified are ignored.
 
-**ВАЖНО**: Поля в которых не заданы значения игнорируются.
-
-### Параметры
-
-Представление JSON параметров:
+### Parameters
 
 ```json
 {
-  "type": string,
-  "hook": Hook
+  "type": "notify | object | mixed | hook",
+  "hook": { ... }
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-type | STRING | notify, object, mixed, hook | **Необязательный**. Тип ответа.
-hook  | JSON | Hook | **Обязательный** для типа hook. Ловушка.
+Field | Type | Values | Description
+----- | ---- | ------ | -----------
+`type` | STRING | `notify`, `object`, `mixed`, `hook` | **Optional.** Response type.
+`hook` | JSON | Hook object | **Required** when `type` is `hook`.
 
-* Если указать `notify`, то в ответ будут приходить сами уведомления.
-* Если указать `object`, то в ответ будут приходить данные объекта в формате /get запроса.
-* Если указать `mixed`, то в ответ будут приходить и сами уведомления и данные объекта в формате /get запроса.
-* Если указать `hook`, то ответом будет результат выполнения API запроса из `Hook`.
+- `notify` — deliver the raw notification.
+- `object` — deliver the object data as returned by a `/get` request.
+- `mixed` — deliver both the notification and the object data.
+- `hook` — deliver the result of the API request defined in `hook`.
 
 ### Hook
 
-Ловушка задает параметры выполнения запроса API. При каждом выполнении условий подписки ответом будут данные из запроса ловушки.
+A hook defines an API request to execute each time the subscription condition is met.
 
 ```json
 {
-  "method": string,
-  "path": string,
-  "payload": json
+  "method": "POST | GET",
+  "path":   "<api-path>",
+  "payload": { ... }
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-method | STRING | POST, GET | **Необязательный**. HTTP-метод.
-path  | STRING | | **Обязательный**. REST API путь к конечной точке.
-payload  | JSON | Hook | **Вариативный**. Полезная нагрузка. Зависит от запроса.
+Field | Type | Description
+----- | ---- | -----------
+`method` | STRING | **Optional.** HTTP method (`POST` or `GET`).
+`path` | STRING | **Required.** REST API path.
+`payload` | JSON | **Optional.** Request payload. Depends on the endpoint.
 
-## Извещения (`notice`)
+## Notices (`notice`)
 
-Издатель `notice` предоставляет возможность подписаться на системные извещения.
+The `notice` publisher delivers system notices.
 
-### Фильтр
-
-Представление JSON для фильтра отбора событий:
+### Filter
 
 ```json
 {
-  "categories": enum (string)
+  "categories": ["<code>", ...]
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-categories  | JSON array | Коды (строка) | **Необязательный**. Категория.
+Field | Type | Description
+----- | ---- | -----------
+`categories` | JSON array of strings | **Optional.** Category codes.
 
-**ВАЖНО**: Фильтр по полям работает по условию `И`, по значением в поле по условию `ИЛИ`.
-
-**ВАЖНО**: Поля в которых не заданы значения игнорируются.
-
-### Параметры
-
-Представление JSON параметров:
+### Parameters
 
 ```json
 {
-  "type": string
+  "type": "notify"
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-type | STRING | notify | **Необязательный**. Тип ответа.
+Field | Type | Description
+----- | ---- | -----------
+`type` | STRING | **Optional.** Response type. Currently `notify`.
 
-## Сообщения (`message`)
+## Messages (`message`)
 
-Издатель `message` предоставляет возможность подписаться на входящие и исходящие сообщения.
+The `message` publisher delivers inbound and outbound messages.
 
-### Фильтр
-
-Представление JSON для фильтра отбора событий:
+### Filter
 
 ```json
 {
-  "classes": enum (string)
-  "types": enum (string)
-  "agents": enum (string)
-  "codes": enum (string)
-  "profiles": enum (string)
-  "addresses": enum (string)
-  "subjects": enum (string)
+  "classes":   ["inbox", "outbox"],
+  "types":     ["<code>", ...],
+  "agents":    ["<code>", ...],
+  "codes":     ["<code>", ...],
+  "profiles":  ["<value>", ...],
+  "addresses": ["<value>", ...],
+  "subjects":  ["<value>", ...]
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-classes  | JSON array | inbox, outbox | **Необязательный**. Класс сообщения (входящее или исходящее).
-types  | JSON array | Коды (строка) | **Необязательный**. Код типа агента.
-agents  | JSON array | Коды (строка) | **Необязательный**. Код агента.
-codes  | JSON array | Коды (строка) | **Необязательный**. Код сообщения.
-profiles  | JSON array |  | **Необязательный**. Профиль настроек. Используется для определения профиля настроек сообщения или адреса отправителя.
-addresses  | JSON array |  | **Необязательный**. Адрес получателя. Для API запросов - это маршрут REST API.
-subjects  | JSON array |  | **Необязательный**. Тема сообщения.
+Field | Type | Description
+----- | ---- | -----------
+`classes` | JSON array | **Optional.** Message direction: `inbox` or `outbox`.
+`types` | JSON array of strings | **Optional.** Agent type codes.
+`agents` | JSON array of strings | **Optional.** Agent codes.
+`codes` | JSON array of strings | **Optional.** Message codes.
+`profiles` | JSON array | **Optional.** Settings profile or sender address.
+`addresses` | JSON array | **Optional.** Recipient address (for API requests — the REST route).
+`subjects` | JSON array | **Optional.** Message subject.
 
-**ВАЖНО**: Фильтр по полям работает по условию `И`, по значением в поле по условию `ИЛИ`.
-
-**ВАЖНО**: Поля в которых не заданы значения игнорируются.
-
-### Параметры
-
-Представление JSON параметров:
+### Parameters
 
 ```json
 {
-  "type": string
+  "type": "notify"
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-type | STRING | notify | **Необязательный**. Тип ответа.
+Field | Type | Description
+----- | ---- | -----------
+`type` | STRING | **Optional.** Response type. Currently `notify`.
 
-## Журнал событий (`log`)
+## Event Log (`log`)
 
-Издатель `log` предоставляет возможность подписаться на журнал событий.
+The `log` publisher delivers event log entries.
 
-### Фильтр
-
-Представление JSON для фильтра отбора событий:
+### Filter
 
 ```json
 {
-  "types": enum (string),
-  "codes": enum (integer),
-  "categories": enum (string)
+  "types":      ["M", "W", "E", "D"],
+  "codes":      [<integer>, ...],
+  "categories": ["<code>", ...]
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-types | JSON array | M, W, E, D | **Необязательный**. Тип: Message, Warning, Error, Debug.
-codes  | JSON array | Коды (число) | **Необязательный**. Код. Натуральное число.
-categories  | JSON array | Коды (строка) | **Необязательный**. Категория.
+Field | Type | Description
+----- | ---- | -----------
+`types` | JSON array of strings | **Optional.** Log level: `M` (Message), `W` (Warning), `E` (Error), `D` (Debug).
+`codes` | JSON array of integers | **Optional.** Numeric log codes.
+`categories` | JSON array of strings | **Optional.** Category codes.
 
-**ВАЖНО**: Фильтр по полям работает по условию `И`, по значением в поле по условию `ИЛИ`.
-
-**ВАЖНО**: Поля в которых не заданы значения игнорируются.
-
-### Параметры
-
-Представление JSON параметров:
+### Parameters
 
 ```json
 {
-  "type": string
+  "type": "notify"
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-type | STRING | notify | **Необязательный**. Тип ответа.
+Field | Type | Description
+----- | ---- | -----------
+`type` | STRING | **Optional.** Response type. Currently `notify`.
 
-## Геолокация (`geo`)
+## Geolocation (`geo`)
 
-Издатель `geo` предоставляет возможность подписаться на поступающие данные геолокации.
+The `geo` publisher delivers incoming geolocation data.
 
-### Фильтр
-
-Представление JSON для фильтра отбора данных:
+### Filter
 
 ```json
 {
-  "codes": enum (string),
-  "objects": enum (numeric)
+  "codes":   ["<code>", ...],
+  "objects": [<id>, ...]
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-codes | JSON array | Коды (строка) | **Необязательный**. Коды групп координат (мест положений). По умолчанию `default`.
-objects  | JSON array | Идентификаторы | **Необязательный**. Объекты. Массив идентификаторов.
+Field | Type | Description
+----- | ---- | -----------
+`codes` | JSON array of strings | **Optional.** Coordinate group codes (locations). Defaults to `default`.
+`objects` | JSON array of integers | **Optional.** Object IDs.
 
-**ВАЖНО**: Фильтр по полям работает по условию `И`, по значением в поле по условию `ИЛИ`.
-
-**ВАЖНО**: Поля в которых не заданы значения игнорируются.
-
-### Параметры
-
-Представление JSON параметров:
+### Parameters
 
 ```json
 {
-  "type": string
+  "type": "notify"
 }
 ```
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-type | STRING | notify | **Необязательный**. Тип ответа.
+Field | Type | Description
+----- | ---- | -----------
+`type` | STRING | **Optional.** Response type. Currently `notify`.
 
-# Наблюдатель (`observer`)
+Observer API
+-
 
-## Конечные точки наблюдателя
+## Subscribe
 
-### Подписаться
-
-```http request
+```
 POST /api/v1/observer/subscribe
 ```
-Подписаться на события издателя.
 
-**Параметры запроса:**
+Subscribe to a publisher's events.
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-publisher | STRING | notify, log, geo | **Обязательный**. Код издателя.
-filter | JSON |  | **Необязательный**. Фильтр отбора событий издателя.
-params | JSON |  | **Необязательный**. Параметры слушателя.
+**Request fields:**
 
-Примеры запроса:
+Field | Type | Values | Description
+----- | ---- | ------ | -----------
+`publisher` | STRING | `notify`, `notice`, `message`, `log`, `geo` | **Required.** Publisher code.
+`filter` | JSON | | **Optional.** Event filter.
+`params` | JSON | | **Optional.** Listener parameters.
 
-Подписаться на все события издателя с кодом `notify`.
-````json
+**Examples:**
+
+Subscribe to all events from the `notify` publisher:
+
+```json
 {"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify"}}
-````
+```
 
-Подписаться на события издателя с кодом `notify` с учётом фильтра:
-````json
-{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"classes":["client", "device"]},"params":{"type":"object"}}}
-````
-Где фильтр:
-- Классы (`classes`): client, device
+Subscribe with a filter (classes: `client`, `device`) and response type `object`:
 
-Параметры:
-- Тип (`type`): object (в ответ будут приходить данные объекта в формате /get запроса).
+```json
+{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"classes":["client","device"]},"params":{"type":"object"}}}
+```
 
-Подписаться на все входящие сообщения:
-````json
-{"t":2,"u":"observer","a":"/observer/subscribe","p":{"publisher":"notify", "filter": {"entities": ["message"], "classes": ["inbox"], "actions": ["create"]}, "params": {"type": "object"}}}
-````
+Subscribe to all incoming messages:
 
-Отловить создание нового клиента и получить данные в виде списка клиентов:
-````json
-{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"classes":["client"],"actions":["create"]},"params":{"type":"hook","hook":{"path": "/api/v1/client/list", "payload": {}}}}}
-````
+```json
+{"t":2,"u":"observer","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"entities":["message"],"classes":["inbox"],"actions":["create"]},"params":{"type":"object"}}}
+```
 
-### Отписаться
+Catch new client creation and receive the result as a client list:
 
-```http request
+```json
+{"t":2,"u":"<uuid>","a":"/observer/subscribe","p":{"publisher":"notify","filter":{"classes":["client"],"actions":["create"]},"params":{"type":"hook","hook":{"path":"/api/v1/client/list","payload":{}}}}}
+```
+
+## Unsubscribe
+
+```
 POST /api/v1/observer/unsubscribe
 ```
-Отписаться от событий издателя.
 
-**Параметры запроса:**
+Unsubscribe from a publisher's events.
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-publisher | STRING | notify, log, geo | **Обязательный**. Код издателя.
+**Request fields:**
 
-Пример запроса:
-````json
+Field | Type | Values | Description
+----- | ---- | ------ | -----------
+`publisher` | STRING | `notify`, `notice`, `message`, `log`, `geo` | **Required.** Publisher code.
+
+**Example:**
+
+```json
 {"t":2,"u":"<uuid>","a":"/observer/unsubscribe","p":{"publisher":"notify"}}
-````
+```
 
-# Издатель (`publisher`)
+Publisher API
+-
 
-## Конечные точки издателя
+## Get publisher data
 
-```http request
+```
 POST /api/v1/observer/publisher
 ```
-Получить данные издателя.
 
-**Параметры запроса:**
+**Request fields:**
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-code | STRING | notify, log, geo | **Обязательный**. Код издателя.
-fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
+Field | Type | Values | Description
+----- | ---- | ------ | -----------
+`code` | STRING | `notify`, `notice`, `message`, `log`, `geo` | **Required.** Publisher code.
+`fields` | JSON array | | **Optional.** Array of field names to return. If omitted, all fields are returned.
 
-### Данные издателя
+## Get publisher by code
 
-```http request
+```
 POST /api/v1/observer/publisher/get
 ```
-Получить данные издателя.
 
-**Параметры запроса:**
+**Request fields:**
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-code | STRING | notify, log, geo | **Обязательный**. Код издателя.
-fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
+Field | Type | Values | Description
+----- | ---- | ------ | -----------
+`code` | STRING | `notify`, `notice`, `message`, `log`, `geo` | **Required.** Publisher code.
+`fields` | JSON array | | **Optional.** Array of field names to return. If omitted, all fields are returned.
 
-### Количество издателей
+## Count publishers
 
-```http request
+```
 POST /api/v1/observer/publisher/count
 ```
-Количество издателей с возможностью указания фильтра отбора данных.
 
-**Параметры запроса:**
-[Общие параметры запроса для списка](https://github.com/apostoldevel/db-platform#%D0%BE%D0%B1%D1%89%D0%B8%D0%B5-%D0%BF%D0%B0%D1%80%D0%B0%D0%BC%D0%B5%D1%82%D1%80%D1%8B-%D0%B7%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D0%B0-%D0%B4%D0%BB%D1%8F-%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%B0)
+**Request fields:** [Common list query parameters](https://github.com/apostoldevel/db-platform#common-list-query-parameters)
 
-### Список издателей
-```http request
+## List publishers
+
+```
 POST /api/v1/observer/publisher/list
 ```
-Список издателей с возможностью указания фильтра отбора.
 
-**Параметры запроса:**
-[Общие параметры запроса для списка](https://github.com/apostoldevel/db-platform#%D0%BE%D0%B1%D1%89%D0%B8%D0%B5-%D0%BF%D0%B0%D1%80%D0%B0%D0%BC%D0%B5%D1%82%D1%80%D1%8B-%D0%B7%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D0%B0-%D0%B4%D0%BB%D1%8F-%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%B0)
+**Request fields:** [Common list query parameters](https://github.com/apostoldevel/db-platform#common-list-query-parameters)
 
-# Слушатель (`listener`)
+Listener API
+-
 
-## Конечные точки слушателя
+## Get listener data
 
-```http request
+```
 POST /api/v1/observer/listener
 ```
-Получить данные слушателя по коду издателя.
 
-**Параметры запроса:**
+**Request fields:**
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-publisher | STRING | notify | **Обязательный**. Код издателя.
-session | STRING |  | **Необязательный**. Код сессии.
-fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
+Field | Type | Values | Description
+----- | ---- | ------ | -----------
+`publisher` | STRING | `notify`, `notice`, `message`, `log`, `geo` | **Required.** Publisher code.
+`session` | STRING | | **Optional.** Session code.
+`fields` | JSON array | | **Optional.** Array of field names to return. If omitted, all fields are returned.
 
-### Установить слушателя
+## Set listener
 
-```http request
+```
 POST /api/v1/observer/listener/set
 ```
-Установить данные слушателя.
 
-**Параметры запроса:**
+**Request fields:**
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-publisher | STRING |  | **Обязательный**. Идентификатор издателя.
-session | STRING |  | **Необязательный**. Код сессии.
-filter | JSON |  | **Необязательный**. Фильтр отбора событий издателя.
-params | JSON |  | **Необязательный**. Параметры слушателя.
+Field | Type | Description
+----- | ---- | -----------
+`publisher` | STRING | **Required.** Publisher identifier.
+`session` | STRING | **Optional.** Session code.
+`filter` | JSON | **Optional.** Event filter.
+`params` | JSON | **Optional.** Listener parameters.
 
-### Данные слушателя
+## Get listener by publisher
 
-```http request
+```
 POST /api/v1/observer/listener/get
 ```
-Получить данные слушателя.
 
-**Параметры запроса:**
+**Request fields:**
 
-Поле | Тип | Значение | Описание
------------- | ------------ | ------------ |------------
-publisher | STRING |  | **Обязательный**. Код издателя.
-session | STRING |  | **Необязательный**. Код сессии.
-fields | JSON array |  | **Необязательный**. Массив JSON string полей в таблице, если не указано то запрос вернет все поля.
+Field | Type | Description
+----- | ---- | -----------
+`publisher` | STRING | **Required.** Publisher code.
+`session` | STRING | **Optional.** Session code.
+`fields` | JSON array | **Optional.** Array of field names to return. If omitted, all fields are returned.
 
-### Количество слушателей
+## Count listeners
 
-```http request
+```
 POST /api/v1/observer/listener/count
 ```
-Количество слушателей с возможностью указания фильтра отбора данных.
 
-**Параметры запроса:**
-[Общие параметры запроса для списка](https://github.com/apostoldevel/db-platform#%D0%BE%D0%B1%D1%89%D0%B8%D0%B5-%D0%BF%D0%B0%D1%80%D0%B0%D0%BC%D0%B5%D1%82%D1%80%D1%8B-%D0%B7%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D0%B0-%D0%B4%D0%BB%D1%8F-%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%B0)
+**Request fields:** [Common list query parameters](https://github.com/apostoldevel/db-platform#common-list-query-parameters)
 
-### Список слушателей
-```http request
+## List listeners
+
+```
 POST /api/v1/observer/listener/list
 ```
-Список слушателей с возможностью указания фильтра отбора.
 
-**Параметры запроса:**
-[Общие параметры запроса для списка](https://github.com/apostoldevel/db-platform#%D0%BE%D0%B1%D1%89%D0%B8%D0%B5-%D0%BF%D0%B0%D1%80%D0%B0%D0%BC%D0%B5%D1%82%D1%80%D1%8B-%D0%B7%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D0%B0-%D0%B4%D0%BB%D1%8F-%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%B0)
+**Request fields:** [Common list query parameters](https://github.com/apostoldevel/db-platform#common-list-query-parameters)
 
-#### Примеры
+Examples
+-
 
-Запрос "Кто я":
-````json
+**Who am I:**
+
+```json
 {"t":2,"u":"<uuid>","a":"/whoami"}
-````
+```
 
-Запросить:
+**Query entities:**
 
-Сущности:
-````json
-{"t":2,"u":"<uuid>","a":"/entity","p":{"fields": ["id", "code", "name"]}}
-````
+```json
+{"t":2,"u":"<uuid>","a":"/entity","p":{"fields":["id","code","name"]}}
+```
 
-Классы:
-````json
-{"t":2,"u":"<uuid>","a":"/class","p":{"fields": ["id", "entity", "entitycode", "entityname", "code", "label"]}}
-````
+**Query classes:**
 
-Действия:
-````json
-{"t":2,"u":"<uuid>","a":"/action","p":{"fields": ["id", "code", "name"]}}
-````
+```json
+{"t":2,"u":"<uuid>","a":"/class","p":{"fields":["id","entity","entitycode","entityname","code","label"]}}
+```
 
-Методы:
-````json
-{"t":2,"u":"<uuid>","a":"/method","p":{"fields": ["id", "class", "classcode", "classlabel", "action", "actioncode", "actionname", "code", "label"]}}
-````
+**Query actions:**
+
+```json
+{"t":2,"u":"<uuid>","a":"/action","p":{"fields":["id","code","name"]}}
+```
+
+**Query methods:**
+
+```json
+{"t":2,"u":"<uuid>","a":"/method","p":{"fields":["id","class","classcode","classlabel","action","actioncode","actionname","code","label"]}}
+```
