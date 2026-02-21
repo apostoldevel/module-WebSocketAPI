@@ -3,7 +3,7 @@ WebSocket API
 
 [![ru](https://img.shields.io/badge/lang-ru-green.svg)](https://github.com/apostoldevel/module-WebSocketAPI/blob/master/README.ru-RU.md)
 
-A **Worker module** for [Apostol](https://github.com/apostoldevel/apostol).
+A **Worker module** for [Apostol](https://github.com/apostoldevel/apostol) + [db-platform](https://github.com/apostoldevel/db-platform) — **Apostol CRM**[^crm].
 
 Description
 -
@@ -632,3 +632,5 @@ Examples
 ```json
 {"t":2,"u":"<uuid>","a":"/method","p":{"fields":["id","class","classcode","classlabel","action","actioncode","actionname","code","label"]}}
 ```
+
+[^crm]: **Apostol CRM** is an abstract term, not a standalone product. It refers to any project that uses both the [Apostol](https://github.com/apostoldevel/apostol) C++ framework and [db-platform](https://github.com/apostoldevel/db-platform) together through purpose-built modules and processes. Each framework can be used independently; combined, they form a full-stack backend platform.
