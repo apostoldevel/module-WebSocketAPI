@@ -1,7 +1,7 @@
 WebSocket API
 -
 
-[![en](https://img.shields.io/badge/lang-en-green.svg)](https://github.com/apostoldevel/module-WebSocketAPI/blob/master/README.md)
+[![en](https://img.shields.io/badge/lang-en-green.svg)](README.md)
 
 **Модуль** для [Apostol](https://github.com/apostoldevel/apostol) + [db-platform](https://github.com/apostoldevel/db-platform) — **Apostol CRM**[^crm].
 
@@ -39,9 +39,14 @@ C++ модуль отвечает за WebSocket-транспорт и марш�
 Настройка
 -
 
-```ini
-[module/WebSocketAPI]
-enable=true
+```json
+{
+  "modules": {
+    "WebSocketAPI": {
+      "enabled": true
+    }
+  }
+}
 ```
 
 Установка

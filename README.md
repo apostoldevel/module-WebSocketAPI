@@ -1,7 +1,7 @@
 WebSocket API
 -
 
-[![ru](https://img.shields.io/badge/lang-ru-green.svg)](https://github.com/apostoldevel/module-WebSocketAPI/blob/master/README.ru-RU.md)
+[![ru](https://img.shields.io/badge/lang-ru-green.svg)](README.ru-RU.md)
 
 A **Worker module** for [Apostol](https://github.com/apostoldevel/apostol) + [db-platform](https://github.com/apostoldevel/db-platform) — **Apostol CRM**[^crm].
 
@@ -39,9 +39,14 @@ Key database objects:
 Configuration
 -
 
-```ini
-[module/WebSocketAPI]
-enable=true
+```json
+{
+  "modules": {
+    "WebSocketAPI": {
+      "enabled": true
+    }
+  }
+}
 ```
 
 Installation

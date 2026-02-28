@@ -1,228 +1,177 @@
-/*++
+#pragma once
+
+#if defined(WITH_POSTGRESQL) && defined(WITH_SSL)
+
+#include "apostol/apostol_module.hpp"
+#include "apostol/event_loop.hpp"
+#include "apostol/http.hpp"
+#include "apostol/jwt.hpp"
+#include "apostol/oauth_providers.hpp"
+#include "apostol/pg.hpp"
+#include "apostol/websocket.hpp"
+
+#include <chrono>
+#include <deque>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
+namespace apostol
+{
+
+class Application;
+
+// ─── WebSocketAPI ──────────────────────────────────────────────────────────
+//
+// Worker module for real-time WebSocket API. Implements JSON-RPC protocol
+// over WebSocket, observer/pub-sub via PostgreSQL LISTEN/NOTIFY, and
+// REST endpoints for push messaging and session listing.
+//
+// WebSocket path: /session/<code>[/<identity>]
+// HTTP paths:     POST /ws/<code>[/<identity>], GET /ws/list
+//
+// Mirrors v1 CWebSocketAPI from apostol-crm.
+//
+class WebSocketAPI final : public ApostolModule
+{
+public:
+    explicit WebSocketAPI(Application& app);
+
+    std::string_view name() const override { return "WebSocketAPI"; }
+    bool enabled() const override { return enabled_; }
+    bool check_location(const HttpRequest& req) const override;
+    void heartbeat(std::chrono::system_clock::time_point now) override;
+
+    /// Called from ws_handler lambda — handles new WebSocket upgrades.
+    void on_ws_upgrade(EventLoop& loop, WsConnection ws, const HttpRequest& req);
+
+protected:
+    void init_methods() override;
+
+private:
+    // ── Session ──────────────────────────────────────────────────────────────
+
+    struct WsSession
+    {
+        std::string session;              // 40-char session code (from URL)
+        std::string identity;             // connection identity ("main" default)
+        std::shared_ptr<WsConnection> ws; // WebSocket connection
+        Authorization auth;               // cached auth state
+        std::string secret;               // session secret (for signed fetch)
+        std::string agent;                // User-Agent
+        std::string ip;                   // client IP
+        bool authorized{false};
+        int update_count{0};              // reference count for safe deletion
+    };
+
+    std::unordered_map<int, std::shared_ptr<WsSession>> sessions_by_fd_;
+    std::unordered_multimap<std::string, std::shared_ptr<WsSession>> sessions_by_code_;
+
+    std::shared_ptr<WsSession> find_session(int fd);
+    std::shared_ptr<WsSession> add_session(WsConnection ws,
+                                           std::string session,
+                                           std::string identity);
+    void remove_session(int fd);
+
+    // ── WebSocket message handling ───────────────────────────────────────────
+
+    void on_ws_message(std::shared_ptr<WsSession> session,
+                       uint8_t opcode, const std::string& payload);
+    void handle_open(std::shared_ptr<WsSession> session,
+                     const std::string& unique_id,
+                     const nlohmann::json& payload);
+    void handle_close(std::shared_ptr<WsSession> session,
+                      const std::string& unique_id);
+    void handle_call(std::shared_ptr<WsSession> session,
+                     const std::string& unique_id,
+                     const std::string& action,
+                     const nlohmann::json& payload);
+
+    // ── WebSocket responses ──────────────────────────────────────────────────
+
+    static void send_call(WsConnection& ws, std::string_view action,
+                          const std::string& payload);
+    static void send_call_result(WsConnection& ws, std::string_view unique_id,
+                                 const std::string& payload);
+    static void send_call_error(WsConnection& ws, std::string_view unique_id,
+                                int code, std::string_view message);
+
+    // ── PG result handling ───────────────────────────────────────────────────
+
+    void on_fetch_result(std::shared_ptr<WsSession> session,
+                         const std::string& unique_id,
+                         const std::string& action,
+                         std::vector<PgResult> results);
 
-Program name:
+    void after_query(WsSession& session, std::string_view action,
+                     const nlohmann::json& payload);
 
-  Apostol CRM
+    // ── Authorization ────────────────────────────────────────────────────────
 
-Module Name:
+    int check_session_auth(const HttpRequest& req, WsSession& session);
 
-  WebSocketAPI.hpp
+    // ── Fetch dispatch ───────────────────────────────────────────────────────
 
-Notices:
+    void unauthorized_fetch(std::shared_ptr<WsSession> session,
+                            const std::string& unique_id,
+                            const std::string& action,
+                            const std::string& payload);
 
-  Module: Web Socket API
+    void authorized_fetch(std::shared_ptr<WsSession> session,
+                          const std::string& unique_id,
+                          const std::string& action,
+                          const std::string& payload);
 
-Author:
+    void signed_fetch(std::shared_ptr<WsSession> session,
+                      const std::string& unique_id,
+                      const std::string& action,
+                      const std::string& payload);
 
-  Copyright (c) Prepodobny Alen
+    // ── Observer (LISTEN/NOTIFY) ─────────────────────────────────────────────
 
-  mailto: alienufo@inbox.ru
-  mailto: ufocomp@gmail.com
+    void init_listen();
+    void on_notify(std::string_view channel, std::string_view data);
 
---*/
+    struct ObserverTask
+    {
+        std::shared_ptr<WsSession> session;
+        std::string publisher;
+        std::string data;
+    };
 
-#ifndef APOSTOL_WEBSOCKETAPI_HPP
-#define APOSTOL_WEBSOCKETAPI_HPP
-//----------------------------------------------------------------------------------------------------------------------
+    void dispatch_observer(ObserverTask task);
+    void unload_queue();
 
-extern "C++" {
+    std::deque<ObserverTask> observer_queue_;
+    std::size_t observer_progress_{0};
+    static constexpr std::size_t max_observer_queue_ = 32;
 
-namespace Apostol {
+    // ── HTTP handlers ────────────────────────────────────────────────────────
 
-    namespace BackEnd {
+    void do_get(const HttpRequest& req, HttpResponse& resp);
+    void do_post(const HttpRequest& req, HttpResponse& resp);
 
-        namespace api {
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
-            void observer(CStringList &SQL, const CString &Publisher, const CString &Session, const CString &Identity,
-                          const CString &Data, const CString &Agent, const CString &IP);
-        }
-    }
+    /// Parse session code and identity from URL path.
+    /// E.g. "/session/abc123/main" -> ("abc123", "main")
+    static std::pair<std::string, std::string>
+    parse_session_path(std::string_view path);
 
-    namespace Module {
+    /// Ensure action has /api/v1 prefix.
+    static std::string normalize_action(std::string_view action);
 
-        class CObserverHandler;
+    // ── State ────────────────────────────────────────────────────────────────
 
-        typedef std::function<void (CObserverHandler *Handler)> COnObserverHandlerEvent;
+    PgPool&               pool_;
+    EventLoop&            loop_;
+    const OAuthProviders& providers_;
+    bool                  enabled_;
+    bool                  listen_initialized_{false};
+    std::chrono::system_clock::time_point next_check_{};
+};
 
-        //--------------------------------------------------------------------------------------------------------------
+} // namespace apostol
 
-        //-- CObserverHandler ------------------------------------------------------------------------------------------
-
-        //--------------------------------------------------------------------------------------------------------------
-
-        class CWebSocketAPI;
-        //--------------------------------------------------------------------------------------------------------------
-
-        class CObserverHandler: public CPollConnection {
-        private:
-
-            CWebSocketAPI *m_pModule;
-            CSession *m_pSession;
-
-            CString m_Publisher {};
-            CString m_Data {};
-
-            bool m_Allow;
-
-            COnObserverHandlerEvent m_Handler;
-
-            int AddToQueue();
-            void RemoveFromQueue();
-
-        protected:
-
-            void SetAllow(bool Value) { m_Allow = Value; }
-
-        public:
-
-            CObserverHandler(CWebSocketAPI *AModule, CSession *ASession, const CString &Publisher, const CString &Data, COnObserverHandlerEvent && Handler);
-
-            ~CObserverHandler() override;
-
-            CSession *Session() const { return m_pSession; }
-
-            const CString &Publisher() const { return m_Publisher; }
-            const CString &Data() const { return m_Data; }
-
-            bool Allow() const { return m_Allow; };
-            void Allow(bool Value) { SetAllow(Value); };
-
-            bool Handler();
-
-            void Close() override;
-        };
-
-        //--------------------------------------------------------------------------------------------------------------
-
-        //-- CWebSocketAPI ---------------------------------------------------------------------------------------------
-
-        //--------------------------------------------------------------------------------------------------------------
-
-        typedef std::function<bool (CTCPConnection *AConnection, const CJSON &Token)> COnAuthorizationContinueEvent;
-        //--------------------------------------------------------------------------------------------------------------
-
-        typedef CPollManager CQueueManager;
-
-        class CWebSocketAPI: public CApostolModule {
-        private:
-
-            CDateTime m_CheckDate;
-
-            CQueue m_Queue;
-            CQueueManager m_QueueManager;
-
-            size_t m_Progress;
-            size_t m_MaxQueue;
-
-            void InitListen();
-            void CheckListen();
-
-            void InitMethods() override;
-
-            void UnloadQueue();
-
-            void DeleteHandler(CObserverHandler *AHandler);
-            static void DeleteSession(CSession *ASession);
-
-            void CheckSession();
-
-            CString VerifyToken(const CString &Token);
-
-            static void AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload);
-
-            static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
-
-            static int CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError = false);
-            static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
-
-        protected:
-
-            CSessionManager m_SessionManager;
-
-            static bool CheckAuthorizationData(const CHTTPRequest &Request, CAuthorization &Authorization);
-
-            static void DoError(const Delphi::Exception::Exception &E);
-
-            static void DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload);
-            static void DoCallResult(CHTTPServerConnection *AConnection, const CString &Payload);
-            static void DoCallResult(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action, const CString &Payload);
-            static void DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                CHTTPReply::CStatusType Status, const CString &Message, const CString &Payload = {});
-
-            void DoObserver(CObserverHandler *AHandler);
-
-            void DoGet(CHTTPServerConnection *AConnection) override;
-            virtual void DoPost(CHTTPServerConnection *AConnection);
-            virtual void DoWebSocket(CHTTPServerConnection *AConnection);
-
-            void DoWS(CHTTPServerConnection *AConnection, const CString &Action);
-            void DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity);
-
-            void DoSessionDisconnected(CObject *Sender);
-
-            void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
-            void DoPostgresQueryExecuted(CPQPollQuery *APollQuery) override;
-            void DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) override;
-
-        public:
-
-            explicit CWebSocketAPI(CModuleProcess *AProcess, const CString& ModuleName, const CString& SectionName = CString());
-
-            ~CWebSocketAPI() override = default;
-
-            static class CWebSocketAPI *CreateModule(CModuleProcess *AProcess) {
-                return new CWebSocketAPI(AProcess, "websocket api", "module/WebSocketAPI");
-            }
-
-            int CheckSessionAuthorization(CSession *ASession);
-
-            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
-            bool CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session, CAuthorization &Authorization);
-            void CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization, COnAuthorizationContinueEvent && OnContinue);
-
-            void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                const CString &Payload, const CString &Agent, const CString &Host);
-
-            void AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization, const CString &UniqueId,
-                const CString &Action, const CString &Payload, const CString &Agent, const CString &Host);
-
-            void PreSignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                const CString &Payload, CSession *ASession);
-
-            void SignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
-                const CString &Agent, const CString &Host, long int ReceiveWindow = 60000);
-
-            void Initialization(CModuleProcess *AProcess) override;
-
-            bool Execute(CHTTPServerConnection *AConnection) override;
-
-            void Heartbeat(CDateTime DateTime) override;
-
-            bool Enabled() override;
-
-            bool CheckLocation(const CLocation &Location) override;
-
-            void IncProgress() { m_Progress++; }
-            void DecProgress() { m_Progress--; }
-
-            int AddToQueue(CObserverHandler *AHandler);
-            void InsertToQueue(int Index, CObserverHandler *AHandler);
-            void RemoveFromQueue(CObserverHandler *AHandler);
-
-            CQueue &Queue() { return m_Queue; }
-            const CQueue &Queue() const { return m_Queue; }
-
-            CPollManager &QueueManager() { return m_QueueManager; }
-            const CPollManager &QueueManager() const { return m_QueueManager; }
-
-            CSessionManager &SessionManager() { return m_SessionManager; }
-            const CSessionManager &SessionManager() const { return m_SessionManager; }
-
-        };
-    }
-}
-
-using namespace Apostol::Module;
-}
-#endif //APOSTOL_WEBSOCKETAPI_HPP
+#endif // defined(WITH_POSTGRESQL) && defined(WITH_SSL)

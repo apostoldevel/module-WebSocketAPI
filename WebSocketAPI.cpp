@@ -1,1435 +1,906 @@
-/*++
+#if defined(WITH_POSTGRESQL) && defined(WITH_SSL)
 
-Program name:
-
-  Apostol CRM
-
-Module Name:
-
-  WebSocketAPI.cpp
-
-Notices:
-
-  Module: Web Socket API
-
-Author:
-
-  Copyright (c) Prepodobny Alen
-
-  mailto: alienufo@inbox.ru
-  mailto: ufocomp@gmail.com
-
---*/
-
-//----------------------------------------------------------------------------------------------------------------------
-
-#include "Core.hpp"
 #include "WebSocketAPI.hpp"
-//----------------------------------------------------------------------------------------------------------------------
+#include "apostol/application.hpp"
 
-#include "jwt.h"
-//----------------------------------------------------------------------------------------------------------------------
+#include "apostol/base64.hpp"
+#include "apostol/http_utils.hpp"
+#include "apostol/pg_utils.hpp"
 
-#define PG_LISTEN_CONF "helper"
-#define PG_LISTEN_NAME "daemon.init_listen()"
-//----------------------------------------------------------------------------------------------------------------------
+#include <algorithm>
+#include <chrono>
+#include <fmt/format.h>
+#include <nlohmann/json.hpp>
+#include <string>
 
-extern "C++" {
+namespace apostol
+{
 
-namespace Apostol {
+// ─── JSON-RPC message types ─────────────────────────────────────────────────
 
-    namespace BackEnd {
+namespace
+{
 
-        namespace api {
+enum class MsgType : int
+{
+    open        = 0,
+    close       = 1,
+    call        = 2,
+    call_result = 3,
+    call_error  = 4,
+};
 
-            void observer(CStringList &SQL, const CString &Publisher, const CString &Session, const CString &Identity,
-                          const CString &Data, const CString &Agent, const CString &IP) {
-                SQL.Add(CString()
-                                .MaxFormatSize(256 + Publisher.Size() + Session.Size() + Identity.Size() + Data.Size() + Agent.Size() + IP.Size())
-                                .Format("SELECT * FROM daemon.observer('%s', '%s', %s, %s::jsonb, %s, %s);",
-                                        Publisher.c_str(),
-                                        Session.c_str(),
-                                        PQQuoteLiteral(Identity).c_str(),
-                                        PQQuoteLiteral(Data).c_str(),
-                                        PQQuoteLiteral(Agent).c_str(),
-                                        PQQuoteLiteral(IP).c_str()
-                                ));
-            }
-        }
+/// Generate a unique ID (hex microseconds) for server-initiated messages.
+std::string make_unique_id()
+{
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return fmt::format("{:x}", static_cast<uint64_t>(us));
+}
+
+/// Build JSON-RPC call message: {"t":2, "u":"<uid>", "a":"<action>", "p":<payload>}
+std::string build_call_msg(std::string_view action, const std::string& payload)
+{
+    nlohmann::json msg;
+    msg["t"] = static_cast<int>(MsgType::call);
+    msg["u"] = make_unique_id();
+    msg["a"] = action;
+
+    try {
+        msg["p"] = nlohmann::json::parse(payload);
+    } catch (...) {
+        msg["p"] = payload;
     }
-    //------------------------------------------------------------------------------------------------------------------
 
-    namespace Module {
+    return msg.dump();
+}
 
-        //--------------------------------------------------------------------------------------------------------------
+/// Build JSON-RPC call_result message: {"t":3, "u":"<uid>", "p":<payload>}
+std::string build_result_msg(std::string_view unique_id,
+                             const std::string& payload)
+{
+    nlohmann::json msg;
+    msg["t"] = static_cast<int>(MsgType::call_result);
+    msg["u"] = unique_id;
 
-        //-- CObserverHandler ------------------------------------------------------------------------------------------
+    try {
+        msg["p"] = nlohmann::json::parse(payload);
+    } catch (...) {
+        msg["p"] = payload;
+    }
 
-        //--------------------------------------------------------------------------------------------------------------
+    return msg.dump();
+}
 
-        CObserverHandler::CObserverHandler(CWebSocketAPI *AModule, CSession *ASession, const CString &Publisher,
-                const CString &Data, COnObserverHandlerEvent && Handler): CPollConnection(&AModule->QueueManager()), m_Allow(true) {
-            m_pModule = AModule;
-            m_pSession = ASession;
-            m_Publisher = Publisher;
-            m_Data = Data;
-            m_Handler = Handler;
-            m_pSession->BeginUpdate();
-            AddToQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
+/// Build JSON-RPC call_error message: {"t":4, "u":"<uid>", "c":<code>, "m":"<msg>"}
+std::string build_error_msg(std::string_view unique_id,
+                            int code, std::string_view message)
+{
+    nlohmann::json msg;
+    msg["t"] = static_cast<int>(MsgType::call_error);
+    msg["u"] = unique_id;
+    msg["c"] = code;
+    msg["m"] = message;
+    return msg.dump();
+}
 
-        void CObserverHandler::Close() {
-            m_Allow = false;
-            m_pSession->EndUpdate();
-            m_pSession = nullptr;
-            RemoveFromQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
+/// Default receive window for signed_fetch (milliseconds).
+constexpr int kReceiveWindowMs = 60000;
 
-        CObserverHandler::~CObserverHandler() {
-            CObserverHandler::Close();
-        }
-        //--------------------------------------------------------------------------------------------------------------
+} // anonymous namespace
 
-        int CObserverHandler::AddToQueue() {
-            return m_pModule->AddToQueue(this);
-        }
-        //--------------------------------------------------------------------------------------------------------------
+// ─── Construction ───────────────────────────────────────────────────────────
 
-        void CObserverHandler::RemoveFromQueue() {
-            m_pModule->RemoveFromQueue(this);
-        }
-        //--------------------------------------------------------------------------------------------------------------
+WebSocketAPI::WebSocketAPI(Application& app)
+    : pool_(app.db_pool())
+    , loop_(app.worker_loop())
+    , providers_(app.providers())
+    , enabled_(true)
+{
+    add_allowed_header("Authorization");
+    add_allowed_header("Session");
+    add_allowed_header("Secret");
 
-        bool CObserverHandler::Handler() {
-            if (m_Allow && m_Handler) {
-                m_Handler(this);
-                return true;
+    load_allowed_origins(providers_);
+}
+
+// ─── check_location ─────────────────────────────────────────────────────────
+
+bool WebSocketAPI::check_location(const HttpRequest& req) const
+{
+    // HTTP endpoints: /ws/*
+    return req.path.substr(0, 4) == "/ws/" || req.path == "/ws";
+}
+
+// ─── init_methods ───────────────────────────────────────────────────────────
+
+void WebSocketAPI::init_methods()
+{
+    add_method("GET",  [this](auto& req, auto& resp) { do_get(req, resp); });
+    add_method("POST", [this](auto& req, auto& resp) { do_post(req, resp); });
+}
+
+// ─── heartbeat ──────────────────────────────────────────────────────────────
+
+void WebSocketAPI::heartbeat(std::chrono::system_clock::time_point now)
+{
+    if (now < next_check_)
+        return;
+
+    next_check_ = now + std::chrono::seconds(60);
+
+    // Initialize LISTEN on first heartbeat (pool is ready by then)
+    if (!listen_initialized_) {
+        init_listen();
+        listen_initialized_ = true;
+    }
+}
+
+// ─── parse_session_path ─────────────────────────────────────────────────────
+
+std::pair<std::string, std::string>
+WebSocketAPI::parse_session_path(std::string_view path)
+{
+    // Expected: /session/<code>[/<identity>]
+    // or: /ws/<code>[/<identity>] (for POST push)
+
+    // Find the prefix: skip "/session/" or "/ws/"
+    std::string_view rest;
+    if (path.substr(0, 9) == "/session/")
+        rest = path.substr(9);
+    else if (path.substr(0, 4) == "/ws/")
+        rest = path.substr(4);
+    else
+        return {};
+
+    if (rest.empty())
+        return {};
+
+    auto slash = rest.find('/');
+    if (slash == std::string_view::npos)
+        return {std::string(rest), "main"};
+
+    auto code = rest.substr(0, slash);
+    auto identity = rest.substr(slash + 1);
+
+    return {std::string(code),
+            identity.empty() ? std::string("main") : std::string(identity)};
+}
+
+// ─── normalize_action ───────────────────────────────────────────────────────
+
+std::string WebSocketAPI::normalize_action(std::string_view action)
+{
+    if (action.empty())
+        return "/api/v1";
+
+    if (action.substr(0, 8) == "/api/v1/" || action == "/api/v1")
+        return std::string(action);
+
+    return fmt::format("/api/v1{}", action);
+}
+
+// ─── Session management ─────────────────────────────────────────────────────
+
+std::shared_ptr<WebSocketAPI::WsSession>
+WebSocketAPI::find_session(int fd)
+{
+    auto it = sessions_by_fd_.find(fd);
+    return it != sessions_by_fd_.end() ? it->second : nullptr;
+}
+
+std::shared_ptr<WebSocketAPI::WsSession>
+WebSocketAPI::add_session(WsConnection ws,
+                          std::string session,
+                          std::string identity)
+{
+    auto s = std::make_shared<WsSession>();
+    s->session  = std::move(session);
+    s->identity = std::move(identity);
+    s->ws       = std::make_shared<WsConnection>(std::move(ws));
+
+    int fd = s->ws->fd();
+    sessions_by_fd_[fd] = s;
+    sessions_by_code_.emplace(s->session, s);
+
+    return s;
+}
+
+void WebSocketAPI::remove_session(int fd)
+{
+    auto it = sessions_by_fd_.find(fd);
+    if (it == sessions_by_fd_.end())
+        return;
+
+    auto session = it->second;
+
+    // Don't delete while observer queries are in-flight
+    if (session->update_count > 0)
+        return;
+
+    sessions_by_fd_.erase(it);
+
+    // Remove from secondary index
+    auto range = sessions_by_code_.equal_range(session->session);
+    for (auto it2 = range.first; it2 != range.second; ) {
+        if (it2->second.get() == session.get())
+            it2 = sessions_by_code_.erase(it2);
+        else
+            ++it2;
+    }
+
+    loop_.remove_io(fd);
+}
+
+// ─── on_ws_upgrade ──────────────────────────────────────────────────────────
+
+void WebSocketAPI::on_ws_upgrade(EventLoop& loop, WsConnection ws,
+                                 const HttpRequest& req)
+{
+    auto [code, identity] = parse_session_path(req.path);
+    if (code.empty()) {
+        ws.send_close(1008, "Invalid session path");
+        return;
+    }
+
+    auto session = add_session(std::move(ws), std::move(code),
+                               std::move(identity));
+    session->agent = get_user_agent(req);
+    session->ip    = get_real_ip(req);
+
+    // Check handshake-level authorization (headers)
+    check_session_auth(req, *session);
+
+    int fd = session->ws->fd();
+    loop.add_io(fd, EPOLLIN, [this, session](uint32_t) {
+        bool ok = session->ws->on_readable(
+            [this, session](uint8_t opcode, const std::string& payload) {
+                on_ws_message(session, opcode, payload);
+            },
+            [this, session]() {
+                remove_session(session->ws->fd());
             }
-            return false;
+        );
+        if (!ok) {
+            remove_session(session->ws->fd());
         }
-
-        //--------------------------------------------------------------------------------------------------------------
-
-        //-- CWebSocketAPI ---------------------------------------------------------------------------------------------
-
-        //--------------------------------------------------------------------------------------------------------------
-
-        CWebSocketAPI::CWebSocketAPI(CModuleProcess *AProcess, const CString &ModuleName, const CString &SectionName)
-                : CApostolModule(AProcess, ModuleName, SectionName) {
-
-            m_Headers.Add("Authorization");
-            m_Headers.Add("Session");
-            m_Headers.Add("Secret");
-
-            m_CheckDate = 0;
-            m_Progress = 0;
-            m_MaxQueue = Config()->PostgresPollMin();
-
-            CWebSocketAPI::InitMethods();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::InitMethods() {
-#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-            m_Methods.AddObject(_T("GET")    , (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoGet(Connection); }));
-            m_Methods.AddObject(_T("POST")   , (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoPost(Connection); }));
-            m_Methods.AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(true , [this](auto && Connection) { DoOptions(Connection); }));
-            m_Methods.AddObject(_T("HEAD")   , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-            m_Methods.AddObject(_T("PUT")    , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-            m_Methods.AddObject(_T("DELETE") , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-            m_Methods.AddObject(_T("TRACE")  , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-            m_Methods.AddObject(_T("PATCH")  , (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-            m_Methods.AddObject(_T("CONNECT"), (CObject *) new CMethodHandler(false, [this](auto && Connection) { MethodNotAllowed(Connection); }));
-#else
-            m_Methods.AddObject(_T("GET")    , (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoGet, this, _1)));
-            m_Methods.AddObject(_T("POST")   , (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoPost, this, _1)));
-            m_Methods.AddObject(_T("OPTIONS"), (CObject *) new CMethodHandler(true , std::bind(&CWebSocketAPI::DoOptions, this, _1)));
-            m_Methods.AddObject(_T("HEAD")   , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-            m_Methods.AddObject(_T("PUT")    , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-            m_Methods.AddObject(_T("DELETE") , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-            m_Methods.AddObject(_T("TRACE")  , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-            m_Methods.AddObject(_T("PATCH")  , (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-            m_Methods.AddObject(_T("CONNECT"), (CObject *) new CMethodHandler(false, std::bind(&CWebSocketAPI::MethodNotAllowed, this, _1)));
-#endif
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        int CWebSocketAPI::CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError) {
-            int errorCode = 0;
-
-            if (Json.HasOwnProperty(_T("error"))) {
-                const auto &error = Json[_T("error")];
-
-                if (error.HasOwnProperty(_T("code"))) {
-                    errorCode = error[_T("code")].AsInteger();
-                } else {
-                    errorCode = 40000;
-                }
-
-                if (error.HasOwnProperty(_T("message"))) {
-                    ErrorMessage = error[_T("message")].AsString();
-                } else {
-                    ErrorMessage = _T("Invalid request.");
-                }
-
-                if (RaiseIfError)
-                    throw EDBError(ErrorMessage.c_str());
-
-                if (errorCode >= 10000)
-                    errorCode = errorCode / 100;
-
-                if (errorCode < 0)
-                    errorCode = 400;
-            }
-
-            return errorCode;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        CHTTPReply::CStatusType CWebSocketAPI::ErrorCodeToStatus(int ErrorCode) {
-            CHTTPReply::CStatusType Status = CHTTPReply::ok;
-
-            if (ErrorCode != 0) {
-                switch (ErrorCode) {
-                    case 401:
-                        Status = CHTTPReply::unauthorized;
-                        break;
-
-                    case 403:
-                        Status = CHTTPReply::forbidden;
-                        break;
-
-                    case 404:
-                        Status = CHTTPReply::not_found;
-                        break;
-
-                    case 500:
-                        Status = CHTTPReply::internal_server_error;
-                        break;
-
-                    default:
-                        Status = CHTTPReply::bad_request;
-                        break;
-                }
-            }
-
-            return Status;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload) {
-
-            auto pSession = dynamic_cast<CSession *> (AConnection->Object());
-
-            auto SignIn = [pSession](const CJSON &Payload) {
-
-                const auto &session = Payload[_T("session")].AsString();
-                const auto &secret = Payload[_T("secret")].AsString();
-
-                pSession->Session() = session;
-                pSession->Secret() = secret;
-
-                pSession->Authorized(true);
-            };
-
-            auto SignOut = [pSession](const CJSON &Payload) {
-                pSession->Secret().Clear();
-                pSession->Authorization().Clear();
-                pSession->Authorized(false);
-            };
-
-            auto Authorize = [pSession](const CJSON &Payload) {
-
-                if (Payload.HasOwnProperty(_T("authorized"))) {
-                    pSession->Authorized(Payload[_T("authorized")].AsBoolean());
-                }
-
-                if (!pSession->Authorized()) {
-                    pSession->Secret().Clear();
-                    pSession->Authorization().Clear();
-
-                    const auto &message = Payload[_T("message")].AsString();
-                    throw Delphi::Exception::Exception(message.IsEmpty() ? _T("Unknown error.") : message.c_str());
-                }
-            };
-
-            if (Path == _T("/api/v1/sign/in")) {
-                SignIn(Payload);
-            } else if (Path == _T("/api/v1/sign/out")) {
-                SignOut(Payload);
-            } else if (Path == _T("/api/v1/authenticate")) {
-                Authorize(Payload);
-            } else if (Path == _T("/api/v1/authorize")) {
-                Authorize(Payload);
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::CheckSession() {
-            for (int i = 0; i < m_SessionManager.Count(); ++i) {
-                const auto pSession = m_SessionManager[i];
-                if (pSession->Connection() != nullptr) {
-                    if (pSession->Connection()->ClosedGracefully()) {
-                        DeleteSession(pSession);
-                    }
-                } else {
-                    DeleteSession(pSession);
-                }
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DeleteSession(CSession *ASession) {
-            if (ASession == nullptr)
-                return;
-
-            if (ASession->UpdateCount() == 0) {
-                delete ASession;
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DeleteHandler(CObserverHandler *AHandler) {
-            delete AHandler;
-            DecProgress();
-            UnloadQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        int CWebSocketAPI::AddToQueue(CObserverHandler *AHandler) {
-            return m_Queue.AddToQueue(this, AHandler);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::InsertToQueue(int Index, CObserverHandler *AHandler) {
-            m_Queue.InsertToQueue(this, Index, AHandler);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::RemoveFromQueue(CObserverHandler *AHandler) {
-            m_Queue.RemoveFromQueue(this, AHandler);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::UnloadQueue() {
-            const auto index = m_Queue.IndexOf(this);
-            if (index != -1) {
-                const auto pQueue = m_Queue[index];
-                for (int i = 0; i < pQueue->Count(); ++i) {
-                    const auto pHandler = (CObserverHandler *) pQueue->Item(i);
-                    if (pHandler != nullptr && pHandler->Allow()) {
-                        pHandler->Handler();
-                        if (m_Progress >= m_MaxQueue) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
-            DebugNotify(AConnection, ANotify);
-
-            for (int i = 0; i < m_SessionManager.Count(); ++i) {
-#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-                new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, [this](auto &&Handler) { DoObserver(Handler); });
-#else
-                new CObserverHandler(this, m_SessionManager[i], ANotify->relname, ANotify->extra, std::bind(&CWebSocketAPI::DoObserver, this, _1));
-#endif
-            }
-
-            UnloadQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoPostgresQueryExecuted(CPQPollQuery *APollQuery) {
-
-            const auto pResult = APollQuery->Results(0);
-
-            if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                QueryException(APollQuery, Delphi::Exception::EDBError(pResult->GetErrorMessage()));
-                return;
-            }
-
-            const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-
-            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-
-                auto &WSReply = pConnection->WSReply();
-
-                CWSMessage wsmResponse;
-
-                wsmResponse.MessageTypeId = mtCallResult;
-                wsmResponse.UniqueId = APollQuery->Data()[_T("UniqueId")];
-                wsmResponse.Action = APollQuery->Data()[_T("Action")];
-
-                const auto bDataArray = wsmResponse.Action.Find(_T("/list")) != CString::npos;
-
-                CHTTPReply::CStatusType status = CHTTPReply::bad_request;
-
-                try {
-                    CString jsonString;
-                    PQResultToJson(pResult, jsonString, bDataArray ? "array" : "object");
-
-                    wsmResponse.Payload << jsonString;
-
-                    if (pResult->nTuples() == 1) {
-                        wsmResponse.ErrorCode = CheckError(bDataArray ? wsmResponse.Payload[0] : wsmResponse.Payload, wsmResponse.ErrorMessage);
-                        if (wsmResponse.ErrorCode == 0) {
-                            status = CHTTPReply::unauthorized;
-                            AfterQuery(pConnection, wsmResponse.Action, wsmResponse.Payload);
-                        } else {
-                            wsmResponse.MessageTypeId = mtCallError;
-                        }
-                    }
-                } catch (Delphi::Exception::Exception &E) {
-                    wsmResponse.MessageTypeId = mtCallError;
-                    wsmResponse.ErrorCode = status;
-                    wsmResponse.ErrorMessage = E.what();
-
-                    Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] Error: %s", E.what());
-                }
-
-                CString sResponse;
-                CWSProtocol::Response(wsmResponse, sResponse);
-
-                WSReply.SetPayload(sResponse);
-                pConnection->SendWebSocket(true);
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-
-            const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-
-            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-                const auto &caWSRequest = pConnection->WSRequest();
-                auto &WSReply = pConnection->WSReply();
-
-                const CString csRequest(caWSRequest.Payload());
-
-                CWSMessage wsmRequest;
-                CWSProtocol::Request(csRequest, wsmRequest);
-
-                CWSMessage wsmResponse;
-                CString sResponse;
-
-                CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
-
-                wsmResponse.MessageTypeId = mtCallError;
-                wsmResponse.ErrorCode = CHTTPReply::internal_server_error;
-                wsmResponse.ErrorMessage = E.what();
-
-                CWSProtocol::Response(wsmResponse, sResponse);
-
-                WSReply.SetPayload(sResponse);
-                pConnection->SendWebSocket(true);
-            }
-
-            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] Query exception: %s", E.what());
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-            QueryException(APollQuery, E);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
-                const CString &Action, const CString &Payload, const CString &Agent, const CString &Host) {
-
-            CStringList SQL;
-
-            const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
-
-            SQL.Add(CString()
-                            .MaxFormatSize(256 + Action.Size() + caPayload.Size() + Agent.Size())
-                            .Format("SELECT * FROM daemon.unauthorized_fetch('POST', %s, %s::jsonb, %s, %s);",
-                                    PQQuoteLiteral(Action).c_str(),
-                                    caPayload.c_str(),
-                                    PQQuoteLiteral(Agent).c_str(),
-                                    PQQuoteLiteral(Host).c_str()
-            ));
-
-            AConnection->Data().Values("authorized", "false");
-            AConnection->Data().Values("signature", "false");
-
+    });
+}
+
+// ─── check_session_auth ─────────────────────────────────────────────────────
+
+int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
+{
+    // Priority 1: Authorization header (Bearer or Basic)
+    auto auth_header = req.header("Authorization");
+    if (!auth_header.empty()) {
+        session.auth = parse_authorization(auth_header);
+
+        if (session.auth.schema == Authorization::Schema::bearer) {
             try {
-                const auto pQuery = ExecSQL(SQL, AConnection);
-                pQuery->Data().Values(_T("UniqueId"), UniqueId);
-                pQuery->Data().Values(_T("Action"), Action);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization,
-                const CString &UniqueId, const CString &Action, const CString &Payload, const CString &Agent, const CString &Host) {
-
-            CStringList SQL;
-
-            if (Authorization.Schema == CAuthorization::asBearer) {
-
-                const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
-
-                SQL.Add(CString()
-                                .MaxFormatSize(256 + Authorization.Token.Size() + Action.Size() + caPayload.Size() + Agent.Size())
-                                .Format("SELECT * FROM daemon.fetch(%s, 'POST', %s, %s::jsonb, %s, %s);",
-                                        PQQuoteLiteral(Authorization.Token).c_str(),
-                                        PQQuoteLiteral(Action).c_str(),
-                                        caPayload.c_str(),
-                                        PQQuoteLiteral(Agent).c_str(),
-                                        PQQuoteLiteral(Host).c_str()
-                ));
-
-            } else if (Authorization.Schema == CAuthorization::asBasic) {
-
-                const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
-
-                SQL.Add(CString()
-                                .MaxFormatSize(256 + Action.Size() + caPayload.Size() + Agent.Size())
-                                .Format("SELECT * FROM daemon.%s_fetch(%s, %s, 'POST', %s, %s::jsonb, %s, %s);",
-                                        Authorization.Type == CAuthorization::atSession ? "session" : "authorized",
-                                        PQQuoteLiteral(Authorization.Username).c_str(),
-                                        PQQuoteLiteral(Authorization.Password).c_str(),
-                                        PQQuoteLiteral(Action).c_str(),
-                                        caPayload.c_str(),
-                                        PQQuoteLiteral(Agent).c_str(),
-                                        PQQuoteLiteral(Host).c_str()
-                ));
-
-            } else {
-
-                return UnauthorizedFetch(AConnection, UniqueId, Action, Payload, Agent, Host);
-
-            }
-
-            AConnection->Data().Values("authorized", "true");
-            AConnection->Data().Values("signature", "false");
-
-            try {
-                const auto pQuery = ExecSQL(SQL, AConnection);
-                pQuery->Data().Values(_T("UniqueId"), UniqueId);
-                pQuery->Data().Values(_T("Action"), Action);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::PreSignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
-                const CString &Action, const CString &Payload, CSession *ASession) {
-
-            const auto &caNonce = CString::ToString(MsEpoch() * 1000);
-
-            CString sData = Action;
-            sData << caNonce;
-            sData << (Payload.IsEmpty() || Payload == "{}" || Payload == "[]" ? _T("null") : Payload);
-
-            const auto &caSignature = ASession->Secret().IsEmpty() ? _T("") : HMAC_SHA256(ASession->Secret(), sData, true);
-
-            SignedFetch(AConnection, UniqueId, Action, Payload, ASession->Session(), caNonce, caSignature, ASession->Agent(), ASession->IP());
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::SignedFetch(CHTTPServerConnection *AConnection, const CString &UniqueId,
-                const CString &Action, const CString &Payload, const CString &Session, const CString &Nonce,
-                const CString &Signature, const CString &Agent, const CString &Host, long int ReceiveWindow) {
-
-            CStringList SQL;
-
-            const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
-
-            SQL.Add(CString()
-                            .MaxFormatSize(256 + Action.Size() + caPayload.Size() + Session.Size() + Nonce.Size() + Signature.Size() + Agent.Size())
-                            .Format("SELECT * FROM daemon.signed_fetch('POST', %s, %s::json, %s, %s, %s, %s, %s, INTERVAL '%d milliseconds');",
-                                    PQQuoteLiteral(Action).c_str(),
-                                    caPayload.c_str(),
-                                    PQQuoteLiteral(Session).c_str(),
-                                    PQQuoteLiteral(Nonce).c_str(),
-                                    PQQuoteLiteral(Signature).c_str(),
-                                    PQQuoteLiteral(Agent).c_str(),
-                                    PQQuoteLiteral(Host).c_str(),
-                                    ReceiveWindow
-            ));
-
-            AConnection->Data().Values("authorized", "true");
-            AConnection->Data().Values("signature", "true");
-
-            try {
-                const auto pQuery = ExecSQL(SQL, AConnection);
-                pQuery->Data().Values(_T("UniqueId"), UniqueId);
-                pQuery->Data().Values(_T("Action"), Action);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(AConnection, UniqueId, Action, CHTTPReply::service_unavailable, E.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CWebSocketAPI::CheckAuthorizationData(const CHTTPRequest &Request, CAuthorization &Authorization) {
-
-            const auto &caHeaders = Request.Headers;
-            const auto &caAuthorization = caHeaders.Values(_T("Authorization"));
-
-            if (caAuthorization.IsEmpty()) {
-
-                const auto &headerSession = caHeaders.Values(_T("Session"));
-                const auto &headerSecret = caHeaders.Values(_T("Secret"));
-
-                Authorization.Username = headerSession;
-                Authorization.Password = headerSecret;
-
-                if (Authorization.Username.IsEmpty() || Authorization.Password.IsEmpty())
-                    return false;
-
-                Authorization.Schema = CAuthorization::asBasic;
-                Authorization.Type = CAuthorization::atSession;
-
-            } else {
-                Authorization << caAuthorization;
-            }
-
-            return true;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CWebSocketAPI::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization) {
-
-            const auto &caRequest = AConnection->Request();
-
-            try {
-                if (CheckAuthorizationData(caRequest, Authorization)) {
-                    if (Authorization.Schema == CAuthorization::asBearer) {
-                        VerifyToken(Authorization.Token);
-                        return true;
-                    }
+                auto claims = verify_jwt(session.auth.token, providers_);
+                // Verify sub matches session code
+                if (!claims.sub.empty() && claims.sub != session.session) {
+                    session.authorized = false;
+                    return -1;
                 }
-
-                if (Authorization.Schema == CAuthorization::asBasic)
-                    AConnection->Data().Values("Authorization", "Basic");
-
-                ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
-            } catch (jwt::error::token_expired_exception &e) {
-                ReplyError(AConnection, CHTTPReply::forbidden, e.what());
-            } catch (jwt::error::token_verification_exception &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            } catch (CAuthorizationError &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            } catch (std::exception &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            }
-
-            return false;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CWebSocketAPI::CheckTokenAuthorization(CHTTPServerConnection *AConnection, const CString &Session,
-                CAuthorization &Authorization) {
-
-            const auto &caRequest = AConnection->Request();
-
-            try {
-                if (CheckAuthorizationData(caRequest, Authorization)) {
-                    if (Authorization.Schema == CAuthorization::asBearer) {
-                        if (Session != VerifyToken(Authorization.Token))
-                            throw Delphi::Exception::Exception(_T("Token for another session."));
-                        return true;
-                    }
-                }
-
-                if (Authorization.Schema == CAuthorization::asBasic)
-                    AConnection->Data().Values("Authorization", "Basic");
-
-                ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
-            } catch (jwt::error::token_expired_exception &e) {
-                ReplyError(AConnection, CHTTPReply::forbidden, e.what());
-            } catch (jwt::error::token_verification_exception &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            } catch (CAuthorizationError &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            } catch (std::exception &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            }
-
-            return false;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::CheckBearerAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization,
-                COnAuthorizationContinueEvent && OnContinue) {
-
-            auto OnExecuted = [OnContinue](CPQPollQuery *APollQuery) {
-                const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-
-                if (pConnection == nullptr)
-                    return;
-
-                try {
-                    const auto pResult = APollQuery->Results(0);
-
-                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                    }
-
-                    CString ErrorMessage;
-
-                    const CJSON Payload(pResult->GetValue(0, 0));
-                    const auto status = ErrorCodeToStatus(CheckError(Payload, ErrorMessage));
-
-                    if (status == CHTTPReply::ok) {
-                        OnContinue(pConnection, Payload);
-                    } else {
-                        ReplyError(pConnection, status, ErrorMessage);
-                    }
-                } catch (Delphi::Exception::Exception &E) {
-                    ReplyError(pConnection, CHTTPReply::bad_request, E.what());
-                }
-            };
-
-            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                const auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-                if (pConnection != nullptr) {
-                    ReplyError(pConnection, CHTTPReply::bad_request, E.what());
-                }
-            };
-
-            const auto &caRequest = AConnection->Request();
-
-            try {
-                if (CheckAuthorizationData(caRequest, Authorization)) {
-                    if (Authorization.Schema == CAuthorization::asBearer) {
-                        CStringList SQL;
-
-                        SQL.Add(CString().Format("SELECT daemon.validation(%s);", PQQuoteLiteral(Authorization.Token).c_str()));
-                        ExecSQL(SQL, AConnection, OnExecuted, OnException);
-
-                        return;
-                    }
-
-                    if (Authorization.Schema == CAuthorization::asBasic) {
-                        CStringList SQL;
-
-                        SQL.Add(CString().Format("SELECT daemon.authorized_fetch(%s, %s, 'POST', '/api/v1/sign/in', '%s'::jsonb);",
-                                PQQuoteLiteral(Authorization.Username).c_str(),
-                                PQQuoteLiteral(Authorization.Password).c_str(),
-                                CString().Format(R"({"username": "%s", "password": "%s"})", Authorization.Username.c_str(), Authorization.Password.c_str()).c_str()
-                            ));
-
-                        ExecSQL(SQL, AConnection, OnExecuted, OnException);
-
-                        return;
-                    }
-                }
-
-                if (Authorization.Schema == CAuthorization::asBasic)
-                    AConnection->Data().Values("Authorization", "Basic");
-
-                ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
-            } catch (CAuthorizationError &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            } catch (std::exception &e) {
-                ReplyError(AConnection, CHTTPReply::bad_request, e.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        int CWebSocketAPI::CheckSessionAuthorization(CSession *ASession) {
-
-            const auto pConnection = ASession->Connection();
-            const auto &caRequest = pConnection->Request();
-            auto &Authorization = ASession->Authorization();
-
-            try {
-                if (CheckAuthorizationData(caRequest, Authorization)) {
-                    if (Authorization.Schema == CAuthorization::asBearer) {
-                        if (ASession->Session() != VerifyToken(Authorization.Token))
-                            throw Delphi::Exception::Exception(_T("Token for another session."));
-                    } else {
-                        if (ASession->Session() != Authorization.Username)
-                            throw Delphi::Exception::Exception(_T("Invalid session header value."));
-                    }
-                    return 1;
-                }
+                session.authorized = true;
+                return 1;
+            } catch (const JwtExpiredError&) {
+                session.authorized = false;
                 return -1;
-            } catch (jwt::error::token_expired_exception &e) {
-                ReplyError(pConnection, CHTTPReply::forbidden, e.what());
-            } catch (jwt::error::token_verification_exception &e) {
-                ReplyError(pConnection, CHTTPReply::bad_request, e.what());
-            } catch (CAuthorizationError &e) {
-                ReplyError(pConnection, CHTTPReply::bad_request, e.what());
-            } catch (std::exception &e) {
-                ReplyError(pConnection, CHTTPReply::bad_request, e.what());
-            }
-
-            return 0;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoObserver(CObserverHandler *AHandler) {
-
-            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
-
-                const auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
-
-                if (pHandler == nullptr) {
-                    return;
-                }
-
-                const auto pSession = pHandler->Session();
-
-                if (pSession == nullptr) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                if (!pSession->Authorized()) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                if (pSession->Connection() == nullptr) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                if (pSession->Connection()->ClosedGracefully()) {
-                    DeleteHandler(pHandler);
-                    return;
-                }
-
-                CHTTPReply::CStatusType status = CHTTPReply::internal_server_error;
-
-                try {
-                    const auto pResult = APollQuery->Results(0);
-
-                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                    }
-
-                    if (pResult->nTuples() == 1) {
-                        const CJSON Payload(pResult->GetValue(0, 0));
-                        CString errorMessage;
-
-                        status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
-                        if (status == CHTTPReply::unauthorized) {
-                            pSession->Session().Clear();
-                            pSession->Secret().Clear();
-                            pSession->Authorization().Clear();
-                            pSession->Authorized(false);
-                        }
-
-                        if (status != CHTTPReply::ok) {
-                            throw Delphi::Exception::EDBError(errorMessage.c_str());
-                        }
-                    }
-
-                    if (pResult->nTuples() != 0) {
-                        CString jsonString;
-                        PQResultToJson(pResult, jsonString);
-                        DoCall(pSession->Connection(), "/" + pHandler->Publisher(), jsonString);
-                    }
-                } catch (Delphi::Exception::Exception &E) {
-                    DoError(pSession->Connection(), CString(), CString(), status, E.what());
-                }
-
-                DeleteHandler(pHandler);
-            };
-
-            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                const auto pHandler = dynamic_cast<CObserverHandler *> (APollQuery->Binding());
-                if (pHandler != nullptr) {
-                    const auto pSession = pHandler->Session();
-                    if (pSession != nullptr && !pSession->Connection()->ClosedGracefully()) {
-                        DoError(pSession->Connection(), CString(), CString(), CHTTPReply::service_unavailable, E.what());
-                    }
-                    DeleteHandler(pHandler);
-                }
-            };
-
-            const auto pSession = AHandler->Session();
-
-            if (pSession == nullptr) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            if (!pSession->Authorized()) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            if (pSession->Connection() == nullptr) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            if (pSession->Connection()->ClosedGracefully()) {
-                DeleteHandler(AHandler);
-                return;
-            }
-
-            CStringList SQL;
-
-            api::observer(SQL, AHandler->Publisher(), pSession->Session(), pSession->Identity(), AHandler->Data(), pSession->Agent(), pSession->IP());
-
-            try {
-                ExecSQL(SQL, AHandler, OnExecuted, OnException);
-                AHandler->Allow(false);
-                IncProgress();
-            } catch (Delphi::Exception::Exception &E) {
-                DeleteHandler(AHandler);
-                DoError(E);
+            } catch (const JwtVerificationError&) {
+                session.authorized = false;
+                return -1;
             }
         }
-        //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::DoError(const Delphi::Exception::Exception &E) {
-            Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] Error: %s", E.what());
+        if (session.auth.schema == Authorization::Schema::basic) {
+            session.authorized = true;
+            return 1;
         }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoCall(CHTTPServerConnection *AConnection, const CString &Action, const CString &Payload) {
-            auto &WSReply = AConnection->WSReply();
-
-            CWSMessage wsmMessage;
-
-            wsmMessage.MessageTypeId = mtCall;
-            wsmMessage.UniqueId = GetUID(42).Lower();
-            wsmMessage.Action = Action;
-            wsmMessage.Payload << Payload;
-
-            CString sResponse;
-            CWSProtocol::Response(wsmMessage, sResponse);
-
-            WSReply.SetPayload(sResponse);
-            AConnection->SendWebSocket(true);
-
-            Log()->Message("[WebSocketAPI] [CALL] [%s] [%s] %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), Payload.c_str());
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoCallResult(CHTTPServerConnection *AConnection, const CString &Payload) {
-            if (AConnection->ClosedGracefully())
-                return;
-
-            const auto &caWSRequest = AConnection->WSRequest();
-            auto &WSReply = AConnection->WSReply();
-
-            CWSMessage wsmRequest;
-            CWSMessage wsmResponse;
-
-            const CString csRequest(caWSRequest.Payload());
-
-            CWSProtocol::Request(csRequest, wsmRequest);
-            CWSProtocol::PrepareResponse(wsmRequest, wsmResponse);
-
-            wsmResponse.Payload << Payload;
-
-            CString sResponse;
-            CWSProtocol::Response(wsmResponse, sResponse);
-
-            WSReply.SetPayload(sResponse);
-            AConnection->SendWebSocket(true);
-
-            if (Payload.IsEmpty()) {
-                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str());
-            } else {
-                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]\n\tPAYLOAD: %s", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str(), Payload.c_str());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoCallResult(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action, const CString &Payload) {
-
-            if (AConnection->ClosedGracefully())
-                return;
-
-            auto &WSReply = AConnection->WSReply();
-
-            CWSMessage wsmResponse;
-
-            wsmResponse.MessageTypeId = mtCallResult;
-            wsmResponse.UniqueId = UniqueId;
-            wsmResponse.Action = Action.IsEmpty() ? "Unknown" : Action;
-            wsmResponse.Payload << Payload;
-
-            CString sResponse;
-            CWSProtocol::Response(wsmResponse, sResponse);
-
-            WSReply.SetPayload(sResponse);
-            AConnection->SendWebSocket(true);
-
-            if (Payload.IsEmpty()) {
-                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str());
-            } else {
-                Log()->Message("[WebSocketAPI] [RESULT] [%s] [%s]\n\tPAYLOAD: %s", wsmResponse.UniqueId.c_str(), wsmResponse.Action.c_str(), Payload.c_str());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoError(CHTTPServerConnection *AConnection, const CString &UniqueId, const CString &Action,
-                                    CHTTPReply::CStatusType Status, const CString &Message, const CString &Payload) {
-
-            if (AConnection->ClosedGracefully())
-                return;
-
-            auto &WSReply = AConnection->WSReply();
-
-            CWSMessage wsmMessage;
-
-            wsmMessage.MessageTypeId = mtCallError;
-
-            wsmMessage.UniqueId = UniqueId.IsEmpty() ? GetUID(42).Lower() : UniqueId;
-            wsmMessage.Action = Action.IsEmpty() ? _T("/error") : Action;
-
-            wsmMessage.ErrorCode = Status;
-            wsmMessage.ErrorMessage = Message;
-
-            CString sResponse;
-            CWSProtocol::Response(wsmMessage, sResponse);
-
-            WSReply.SetPayload(sResponse);
-            AConnection->SendWebSocket(true);
-
-            if (Payload.IsEmpty()) {
-                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [ERROR] [%s] [%s] [%d]\n\tMESSAGE: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, Message.c_str());
-            } else {
-                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] [ERROR] [%s] [%s] [%d]\n\tMESSAGE: %s\n\tPAYLOAD: %s", wsmMessage.UniqueId.c_str(), wsmMessage.Action.c_str(), wsmMessage.ErrorCode, Message.c_str(), Payload.c_str());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoWS(CHTTPServerConnection *AConnection, const CString &Action) {
-
-            auto &Reply = AConnection->Reply();
-
-            Reply.ContentType = CHTTPReply::json;
-
-            try {
-                if (Action == "list") {
-                    CJSONValue jsonArray(jvtArray);
-
-                    for (int i = 0; i < m_SessionManager.Count(); i++) {
-                        CJSONValue jsonSession(jvtObject);
-                        CJSONValue jsonConnection(jvtObject);
-
-                        const auto pSession = m_SessionManager[i];
-
-                        jsonSession.Object().AddPair("session", pSession->Session());
-                        jsonSession.Object().AddPair("identity", pSession->Identity());
-                        jsonSession.Object().AddPair("authorized", pSession->Authorized());
-
-                        if (pSession->Connection() != nullptr && !pSession->Connection()->ClosedGracefully()) {
-                            jsonConnection.Object().AddPair("socket", pSession->Connection()->Socket()->Binding()->Handle());
-                            jsonConnection.Object().AddPair("host", pSession->Connection()->Socket()->Binding()->PeerIP());
-                            jsonConnection.Object().AddPair("port", pSession->Connection()->Socket()->Binding()->PeerPort());
-
-                            jsonSession.Object().AddPair("connection", jsonConnection);
-                        } else {
-                            jsonSession.Object().AddPair("connection", CJSONValue());
-                        }
-
-                        jsonArray.Array().Add(jsonSession);
-                    }
-
-                    Reply.Content = jsonArray.ToString();
-
-                    AConnection->SendReply(CHTTPReply::ok);
-                } else {
-                    AConnection->SendStockReply(CHTTPReply::not_found);
-                }
-            } catch (std::exception &e) {
-                ReplyError(AConnection, CHTTPReply::internal_server_error, e.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoPost(CHTTPServerConnection *AConnection) {
-
-            const auto &caRequest = AConnection->Request();
-            auto &Reply = AConnection->Reply();
-
-            Reply.ContentType = CHTTPReply::json;
-
-            CStringList slRouts;
-            SplitColumns(caRequest.Location.pathname, slRouts, '/');
-
-            if (slRouts.Count() < 2) {
-                AConnection->SendStockReply(CHTTPReply::bad_request);
-                return;
-            }
-
-            const auto &caSession = slRouts[1];
-            const auto &caIdentity = slRouts.Count() == 3 ? slRouts[2] : CString();
-
-            CAuthorization Authorization;
-            if (CheckTokenAuthorization(AConnection, caSession, Authorization)) {
-                bool bSent = false;
-
-                for (int i = 0; i < m_SessionManager.Count(); ++i) {
-                    const auto pSession = m_SessionManager[i];
-                    if (pSession->Session() == caSession && (caIdentity.IsEmpty() || pSession->Identity() == caIdentity) && pSession->Authorized()) {
-                        DoCall(pSession->Connection(), "/ws", caRequest.Content);
-                        bSent = true;
-                    }
-                }
-
-                Reply.Content.Clear();
-
-                if (bSent)
-                    Reply.Content = R"({"sent": true, "status": "Success"})";
-                else
-                    Reply.Content = R"({"sent": false, "status": "Session not found"})";
-
-                AConnection->SendReply(CHTTPReply::ok, nullptr, true);
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoGet(CHTTPServerConnection *AConnection) {
-
-            const auto &caRequest = AConnection->Request();
-            auto &Reply = AConnection->Reply();
-
-            Reply.ContentType = CHTTPReply::html;
-
-            CStringList slRouts;
-            SplitColumns(caRequest.Location.pathname, slRouts, '/');
-
-            if (slRouts.Count() < 2) {
-                AConnection->SendStockReply(CHTTPReply::bad_request);
-                return;
-            }
-
-            if (slRouts[0] == _T("ws")) {
-                DoWS(AConnection, slRouts[1]);
-                return;
-            }
-
-            if (slRouts[0] != _T("session")) {
-                AConnection->SendStockReply(CHTTPReply::not_found);
-                return;
-            }
-
-            DoSession(AConnection, slRouts[1], slRouts.Count() == 3 ? slRouts[2] : _T("main"));
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity) {
-
-            const auto &caRequest = AConnection->Request();
-
-            const auto &caSecWebSocketKey = caRequest.Headers.Values(_T("Sec-WebSocket-Key"));
-            const auto &caSecWebSocketProtocol = caRequest.Headers.Values(_T("Sec-WebSocket-Protocol"));
-
-            if (caSecWebSocketKey.IsEmpty()) {
-                AConnection->SendStockReply(CHTTPReply::bad_request);
-                return;
-            }
-
-            const CString csAccept(SHA1(caSecWebSocketKey + _T("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
-            const CString csProtocol(caSecWebSocketProtocol.IsEmpty() ? "" : caSecWebSocketProtocol.SubString(0, caSecWebSocketProtocol.Find(',')));
-
-#ifdef WS_ONE_SESSION
-            const auto pSession = m_SessionManager.Find(Session, Identity);
-
-            if (pSession == nullptr) {
-                pSession = m_SessionManager.Add(AConnection);
-                pSession->Session() = Session;
-                pSession->Identity() = Identity;
-            } else {
-                pSession->SwitchConnection(AConnection);
-            }
-#else
-            const auto pSession = m_SessionManager.Add(AConnection);
-
-            pSession->Session() = Session;
-            pSession->Identity() = Identity;
-#endif
-
-            pSession->IP() = GetRealIP(AConnection);
-            pSession->Agent() = GetUserAgent(AConnection);
-
-#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-            AConnection->OnDisconnected([this](auto && Sender) { DoSessionDisconnected(Sender); });
-#else
-            AConnection->OnDisconnected(std::bind(&CWebSocketAPI::DoSessionDisconnected, this, _1));
-#endif
-
-            const auto checkAuth = CheckSessionAuthorization(pSession);
-            if (checkAuth == 1) {
-                pSession->Authorized(true);
-            } else if (checkAuth == 0) {
-                AConnection->Disconnect();
-                return;
-            }
-
-            AConnection->SwitchingProtocols(csAccept, csProtocol);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoWebSocket(CHTTPServerConnection *AConnection) {
-
-            const auto &caWSRequest = AConnection->WSRequest();
-            const CString csRequest(caWSRequest.Payload());
-
-            try {
-                if (!AConnection->Connected())
-                    return;
-
-                CWSMessage wsmRequest;
-                CWSMessage wsmResponse;
-
-                const auto pSession = dynamic_cast<CSession *> (AConnection->Object());
-
-                try {
-                    CWSProtocol::Request(csRequest, wsmRequest);
-
-                    if (wsmRequest.MessageTypeId == mtOpen) {
-                        if (wsmRequest.Payload.HasOwnProperty(_T("secret"))) {
-                            wsmRequest.Action = _T("/api/v1/authenticate");
-
-                            const auto &session = wsmRequest.Payload[_T("session")].AsString();
-                            const auto &secret = wsmRequest.Payload[_T("secret")].AsString();
-
-                            if (!session.IsEmpty() && session != pSession->Session()) // check session value
-                                throw Delphi::Exception::Exception(_T("Invalid session value."));
-
-                            if (secret.IsEmpty())
-                                throw Delphi::Exception::Exception(_T("Secret cannot be empty."));
-
-                            pSession->Secret() = secret;
-                            pSession->Authorization().Clear();
-                            pSession->Authorized(false);
-
-                            wsmRequest.Payload.Clear();
-                            wsmRequest.Payload.Object().AddPair(_T("session"), pSession->Session());
-                            wsmRequest.Payload.Object().AddPair(_T("secret"), pSession->Secret());
-                            wsmRequest.Payload.Object().AddPair(_T("agent"), pSession->Agent());
-                            wsmRequest.Payload.Object().AddPair(_T("host"), pSession->IP());
-
-                        } else if (wsmRequest.Payload.HasOwnProperty(_T("token"))) {
-                            wsmRequest.Action = _T("/api/v1/authorize");
-
-                            const auto &token = wsmRequest.Payload[_T("token")].AsString();
-
-                            if (pSession->Session() != VerifyToken(token))
-                                throw Delphi::Exception::Exception(_T("Token for another session."));
-
-                            pSession->Secret().Clear();
-                            pSession->Authorization() << _T("Bearer ") + token;
-                            pSession->Authorized(false);
-
-                            wsmRequest.Payload.Clear();
-                            wsmRequest.Payload.Object().AddPair(_T("session"), pSession->Session());
-                            wsmRequest.Payload.Object().AddPair(_T("agent"), pSession->Agent());
-                            wsmRequest.Payload.Object().AddPair(_T("host"), pSession->IP());
-                        } else {
-                            throw Delphi::Exception::Exception(_T("Bad request."));
-                        }
-
-                        wsmRequest.MessageTypeId = mtCall;
-                        UnauthorizedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
-
-                        return;
-                    } else if (wsmRequest.MessageTypeId == mtClose) {
-                        wsmRequest.Action = _T("/api/v1/sign/out");
-                        wsmRequest.MessageTypeId = mtCall;
-                    }
-
-                    if (wsmRequest.MessageTypeId == mtCall) {
-                        const auto &caAuthorization = pSession->Authorization();
-
-                        if (caAuthorization.Schema == CAuthorization::asBasic && caAuthorization.Username != pSession->Session()) {
-                            throw Delphi::Exception::Exception(_T("Invalid session header value."));
-                        }
-
-                        if (!pSession->Authorized())
-                            throw CAuthorizationError(_T("Unauthorized."));
-
-                        if (wsmRequest.Action.SubString(0, 8) != _T("/api/v1/"))
-                            wsmRequest.Action = _T("/api/v1") + wsmRequest.Action;
-
-                        if (caAuthorization.Schema != CAuthorization::asUnknown) {
-                            AuthorizedFetch(AConnection, caAuthorization, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
-                        } else {
-                            PreSignedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.IsNull() ? CString() : wsmRequest.Payload.ToString(), pSession);
-                        }
-                    }
-                } catch (jwt::error::token_expired_exception &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::forbidden, e.what());
-                } catch (jwt::error::token_verification_exception &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e.what(), csRequest);
-                } catch (CAuthorizationError &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::unauthorized, e.what());
-                } catch (std::exception &e) {
-                    DoError(AConnection, wsmRequest.UniqueId, wsmRequest.Action, CHTTPReply::bad_request, e.what(), csRequest);
-                }
-            } catch (std::exception &e) {
-                AConnection->SendWebSocketClose();
-                AConnection->CloseConnection(true);
-
-                Log()->Error(APP_LOG_ERR, 0, "[WebSocketAPI] %s", e.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::DoSessionDisconnected(CObject *Sender) {
-            const auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
-            if (pConnection != nullptr) {
-                const auto pSession = m_SessionManager.FindByConnection(pConnection);
-                if (pSession != nullptr) {
-                    const auto pSocket = pConnection->Socket()->Binding();
-                    if (pSocket != nullptr) {
-                        Log()->Notice(_T("[WebSocketAPI] [%s:%d] Session %s closed connection."),
-                                      pSocket->PeerIP(), pSocket->PeerPort(),
-                                      pSession->Session().IsEmpty() ? "(empty)" : pSession->Session().c_str()
-                        );
-                    }
-                    pSession->SwitchConnection(nullptr);
-                    DeleteSession(pSession);
-                } else {
-                    const auto pSocket = pConnection->Socket()->Binding();
-                    if (pSocket != nullptr) {
-                        Log()->Notice(_T("[WebSocketAPI] [%s:%d] Unknown session closed connection."),
-                                      pSocket->PeerIP(), pSocket->PeerPort()
-                        );
-                    }
-                }
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::Initialization(CModuleProcess *AProcess) {
-            CApostolModule::Initialization(AProcess);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CWebSocketAPI::Execute(CHTTPServerConnection *AConnection) {
-            if (AConnection->Protocol() == pWebSocket) {
-#ifdef _DEBUG
-                WSDebugConnection(AConnection);
-#endif
-                DoWebSocket(AConnection);
-
-                return true;
-            } else {
-                return CApostolModule::Execute(AConnection);
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        CString CWebSocketAPI::VerifyToken(const CString &Token) {
-
-            auto decoded = jwt::decode(Token);
-
-            const auto &aud = CString(decoded.get_audience());
-            const auto &alg = CString(decoded.get_algorithm());
-            const auto &iss = CString(decoded.get_issuer());
-
-            const auto &Providers = Server().Providers();
-
-            CString Application;
-            const auto index = OAuth2::Helper::ProviderByClientId(Providers, aud, Application);
-            if (index == -1)
-                throw COAuth2Error(_T("Not found provider by Client ID."));
-
-            const auto &Provider = Providers[index].Value();
-            const auto &Secret = OAuth2::Helper::GetSecret(Provider, Application);
-
-            CStringList Issuers;
-            Provider.GetIssuers(Application, Issuers);
-            if (Issuers[iss].IsEmpty())
-                throw jwt::error::token_verification_exception(jwt::error::token_verification_error::issuer_missmatch);
-
-            if (alg == "HS256") {
-                auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs256{Secret});
-                verifier.verify(decoded);
-            } else if (alg == "HS384") {
-                auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs384{Secret});
-                verifier.verify(decoded);
-            } else if (alg == "HS512") {
-                auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs512{Secret});
-                verifier.verify(decoded);
-            }
-
-            return decoded.get_payload_claim("sub").as_string();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::InitListen() {
-
-            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
-                try {
-                    const auto pResult = APollQuery->Results(0);
-
-                    if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                    }
-
-                    APollQuery->Connection()->Listeners().Add(PG_LISTEN_NAME);
-#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-                    APollQuery->Connection()->OnNotify([this](auto && APollQuery, auto && ANotify) { DoPostgresNotify(APollQuery, ANotify); });
-#else
-                    APollQuery->Connection()->OnNotify(std::bind(&CWebSocketAPI::DoPostgresNotify, this, _1, _2));
-#endif
-                } catch (Delphi::Exception::Exception &E) {
-                    DoError(E);
-                }
-            };
-
-            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                DoError(E);
-            };
-
-            CStringList SQL;
-
-            SQL.Add("SELECT " PG_LISTEN_NAME ";");
-
-            try {
-                ExecSQL(SQL, nullptr, OnExecuted, OnException, PG_LISTEN_CONF);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(E);
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::CheckListen() {
-            if (!PQClient(PG_LISTEN_CONF).CheckListen(PG_LISTEN_NAME))
-                InitListen();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CWebSocketAPI::Heartbeat(CDateTime DateTime) {
-            CApostolModule::Heartbeat(DateTime);
-            if (DateTime >= m_CheckDate) {
-                m_CheckDate = DateTime + (CDateTime) 1 / MinsPerDay; // 1 min
-                CheckListen();
-                CheckSession();
-            }
-            UnloadQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CWebSocketAPI::Enabled() {
-            if (m_ModuleStatus == msUnknown)
-                m_ModuleStatus = Config()->IniFile().ReadBool(SectionName().c_str(), "enable", true) ? msEnabled : msDisabled;
-            return m_ModuleStatus == msEnabled;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CWebSocketAPI::CheckLocation(const CLocation &Location) {
-            return Location.pathname.SubString(0, 9) == _T("/session/") || Location.pathname.SubString(0, 4) == _T("/ws/");
-        }
-        //--------------------------------------------------------------------------------------------------------------
+    }
+
+    // Priority 2: Session + Secret headers
+    auto sess_hdr   = req.header("Session");
+    auto secret_hdr = req.header("Secret");
+
+    if (!sess_hdr.empty() && !secret_hdr.empty()) {
+        session.secret = std::move(secret_hdr);
+        session.authorized = true;
+        return 1;
+    }
+
+    // No auth — must OPEN later
+    session.authorized = false;
+    return 0;
+}
+
+// ─── on_ws_message ──────────────────────────────────────────────────────────
+
+void WebSocketAPI::on_ws_message(std::shared_ptr<WsSession> session,
+                                 uint8_t opcode, const std::string& payload)
+{
+    if (opcode != WS_OP_TEXT)
+        return;
+
+    nlohmann::json msg;
+    try {
+        msg = nlohmann::json::parse(payload);
+    } catch (const nlohmann::json::exception&) {
+        send_call_error(*session->ws, "", 400, "Invalid JSON");
+        return;
+    }
+
+    int type = msg.value("t", -1);
+    std::string unique_id = msg.value("u", "");
+    std::string action    = msg.value("a", "");
+    nlohmann::json p = msg.contains("p") ? msg["p"] : nlohmann::json::object();
+
+    switch (static_cast<MsgType>(type)) {
+        case MsgType::open:
+            handle_open(session, unique_id, p);
+            break;
+        case MsgType::close:
+            handle_close(session, unique_id);
+            break;
+        case MsgType::call:
+            handle_call(session, unique_id, action, p);
+            break;
+        default:
+            send_call_error(*session->ws, unique_id, 400,
+                            "Unknown message type");
+            break;
     }
 }
+
+// ─── handle_open ────────────────────────────────────────────────────────────
+
+void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
+                               const std::string& unique_id,
+                               const nlohmann::json& payload)
+{
+    std::string secret = payload.value("secret", "");
+    std::string token  = payload.value("token", "");
+
+    if (!secret.empty()) {
+        // Authenticate via session+secret
+        session->secret     = secret;
+        session->authorized = false;
+
+        // Build payload for unauthorized_fetch
+        nlohmann::json auth_payload;
+        auth_payload["session"] = session->session;
+        auth_payload["secret"]  = secret;
+        auth_payload["agent"]   = session->agent;
+        auth_payload["host"]    = session->ip;
+
+        unauthorized_fetch(session, unique_id,
+                           "/api/v1/authenticate",
+                           auth_payload.dump());
+    } else if (!token.empty()) {
+        // Authenticate via JWT token
+        try {
+            auto claims = verify_jwt(token, providers_);
+            // Check that sub matches session
+            if (!claims.sub.empty() && claims.sub != session->session) {
+                send_call_error(*session->ws, unique_id, 401,
+                                "Token subject does not match session.");
+                return;
+            }
+        } catch (const JwtExpiredError&) {
+            send_call_error(*session->ws, unique_id, 401, "Token expired.");
+            return;
+        } catch (const JwtVerificationError& e) {
+            send_call_error(*session->ws, unique_id, 401, e.what());
+            return;
+        }
+
+        session->auth.schema = Authorization::Schema::bearer;
+        session->auth.token  = token;
+        session->authorized  = false;
+
+        nlohmann::json auth_payload;
+        auth_payload["session"] = session->session;
+        auth_payload["agent"]   = session->agent;
+        auth_payload["host"]    = session->ip;
+
+        unauthorized_fetch(session, unique_id,
+                           "/api/v1/authorize",
+                           auth_payload.dump());
+    } else {
+        send_call_error(*session->ws, unique_id, 400,
+                        "OPEN requires 'secret' or 'token'.");
+    }
 }
+
+// ─── handle_close ───────────────────────────────────────────────────────────
+
+void WebSocketAPI::handle_close(std::shared_ptr<WsSession> session,
+                                const std::string& unique_id)
+{
+    if (!session->authorized) {
+        send_call_error(*session->ws, unique_id, 401, "Unauthorized.");
+        return;
+    }
+
+    // Sign out via CALL to /api/v1/sign/out
+    handle_call(session, unique_id, "/api/v1/sign/out",
+                nlohmann::json::object());
+}
+
+// ─── handle_call ────────────────────────────────────────────────────────────
+
+void WebSocketAPI::handle_call(std::shared_ptr<WsSession> session,
+                               const std::string& unique_id,
+                               const std::string& action,
+                               const nlohmann::json& payload)
+{
+    if (!session->authorized) {
+        send_call_error(*session->ws, unique_id, 401, "Unauthorized.");
+        return;
+    }
+
+    auto normalized = normalize_action(action);
+    auto payload_str = payload.dump();
+
+    if (session->auth.schema == Authorization::Schema::bearer) {
+        authorized_fetch(session, unique_id, normalized, payload_str);
+    } else if (session->auth.schema == Authorization::Schema::basic) {
+        authorized_fetch(session, unique_id, normalized, payload_str);
+    } else if (!session->secret.empty()) {
+        signed_fetch(session, unique_id, normalized, payload_str);
+    } else {
+        unauthorized_fetch(session, unique_id, normalized, payload_str);
+    }
+}
+
+// ─── WebSocket response helpers ─────────────────────────────────────────────
+
+void WebSocketAPI::send_call(WsConnection& ws, std::string_view action,
+                             const std::string& payload)
+{
+    ws.send_text(build_call_msg(action, payload));
+}
+
+void WebSocketAPI::send_call_result(WsConnection& ws,
+                                    std::string_view unique_id,
+                                    const std::string& payload)
+{
+    ws.send_text(build_result_msg(unique_id, payload));
+}
+
+void WebSocketAPI::send_call_error(WsConnection& ws,
+                                   std::string_view unique_id,
+                                   int code, std::string_view message)
+{
+    ws.send_text(build_error_msg(unique_id, code, message));
+}
+
+// ─── Fetch dispatch ─────────────────────────────────────────────────────────
+
+void WebSocketAPI::unauthorized_fetch(std::shared_ptr<WsSession> session,
+                                      const std::string& unique_id,
+                                      const std::string& action,
+                                      const std::string& payload)
+{
+    auto action_q  = pq_quote_literal(action);
+    auto payload_q = (payload.empty() || payload == "{}" || payload == "[]")
+                         ? std::string("null")
+                         : pq_quote_literal(payload);
+    auto agent_q   = pq_quote_literal(session->agent);
+    auto host_q    = pq_quote_literal(session->ip);
+
+    auto sql = fmt::format(
+        "SELECT * FROM daemon.unauthorized_fetch('POST', {}, {}::jsonb, {}, {})",
+        action_q, payload_q, agent_q, host_q);
+
+    session->update_count++;
+    pool_.execute(std::move(sql),
+        [this, session, unique_id, action](std::vector<PgResult> results) {
+            session->update_count--;
+            on_fetch_result(session, unique_id, action, std::move(results));
+        },
+        [this, session, unique_id](std::string_view error) {
+            session->update_count--;
+            send_call_error(*session->ws, unique_id, 500,
+                            std::string(error));
+        });
+}
+
+void WebSocketAPI::authorized_fetch(std::shared_ptr<WsSession> session,
+                                    const std::string& unique_id,
+                                    const std::string& action,
+                                    const std::string& payload)
+{
+    auto method_q  = pq_quote_literal("POST");
+    auto action_q  = pq_quote_literal(action);
+    auto payload_q = (payload.empty() || payload == "{}" || payload == "[]")
+                         ? std::string("null")
+                         : pq_quote_literal(payload);
+    auto agent_q   = pq_quote_literal(session->agent);
+    auto host_q    = pq_quote_literal(session->ip);
+
+    std::string sql;
+
+    if (session->auth.schema == Authorization::Schema::bearer) {
+        sql = fmt::format(
+            "SELECT * FROM daemon.fetch({}, {}, {}, {}::jsonb, {}, {})",
+            pq_quote_literal(session->auth.token), method_q,
+            action_q, payload_q, agent_q, host_q);
+    } else if (session->auth.schema == Authorization::Schema::basic) {
+        // Session+Secret headers or Basic auth
+        if (!session->auth.username.empty() && !session->auth.password.empty()
+            && session->auth.username != session->session) {
+            // True Basic auth (username/password)
+            sql = fmt::format(
+                "SELECT * FROM daemon.authorized_fetch({}, {}, {}, {}, {}::jsonb, {}, {})",
+                pq_quote_literal(session->auth.username),
+                pq_quote_literal(session->auth.password),
+                method_q, action_q, payload_q, agent_q, host_q);
+        } else {
+            // Session fetch
+            sql = fmt::format(
+                "SELECT * FROM daemon.session_fetch({}, {}, {}, {}, {}::jsonb, {}, {})",
+                pq_quote_literal(session->session),
+                pq_quote_literal(session->secret),
+                method_q, action_q, payload_q, agent_q, host_q);
+        }
+    }
+
+    if (sql.empty())
+        return;
+
+    session->update_count++;
+    pool_.execute(std::move(sql),
+        [this, session, unique_id, action](std::vector<PgResult> results) {
+            session->update_count--;
+            on_fetch_result(session, unique_id, action, std::move(results));
+        },
+        [this, session, unique_id](std::string_view error) {
+            session->update_count--;
+            send_call_error(*session->ws, unique_id, 500,
+                            std::string(error));
+        });
+}
+
+void WebSocketAPI::signed_fetch(std::shared_ptr<WsSession> session,
+                                const std::string& unique_id,
+                                const std::string& action,
+                                const std::string& payload)
+{
+    // Nonce = microsecond epoch as string
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    auto nonce = std::to_string(us);
+
+    // HMAC input: action + nonce + payload (or "null")
+    auto sig_payload = (payload.empty() || payload == "{}" || payload == "[]")
+                           ? std::string("null")
+                           : payload;
+    auto data = action + nonce + sig_payload;
+    auto signature = hmac_sha256_hex(session->secret, data);
+
+    auto method_q    = pq_quote_literal("POST");
+    auto action_q    = pq_quote_literal(action);
+    auto payload_q   = (payload.empty() || payload == "{}" || payload == "[]")
+                           ? std::string("null")
+                           : pq_quote_literal(payload);
+    auto session_q   = pq_quote_literal(session->session);
+    auto nonce_q     = pq_quote_literal(nonce);
+    auto signature_q = pq_quote_literal(signature);
+    auto agent_q     = pq_quote_literal(session->agent);
+    auto host_q      = pq_quote_literal(session->ip);
+
+    auto sql = fmt::format(
+        "SELECT * FROM daemon.signed_fetch({}, {}, {}::json, {}, {}, {}, {}, {}, "
+        "INTERVAL '{} milliseconds')",
+        method_q, action_q, payload_q, session_q, nonce_q,
+        signature_q, agent_q, host_q, kReceiveWindowMs);
+
+    session->update_count++;
+    pool_.execute(std::move(sql),
+        [this, session, unique_id, action](std::vector<PgResult> results) {
+            session->update_count--;
+            on_fetch_result(session, unique_id, action, std::move(results));
+        },
+        [this, session, unique_id](std::string_view error) {
+            session->update_count--;
+            send_call_error(*session->ws, unique_id, 500,
+                            std::string(error));
+        });
+}
+
+// ─── PG result handling ─────────────────────────────────────────────────────
+
+void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
+                                   const std::string& unique_id,
+                                   const std::string& action,
+                                   std::vector<PgResult> results)
+{
+    if (results.empty() || !results[0].ok()) {
+        std::string err = results.empty()
+            ? "no result"
+            : (results[0].error_message()
+                ? results[0].error_message() : "unknown error");
+        send_call_error(*session->ws, unique_id, 500, err);
+        return;
+    }
+
+    const auto& res = results[0];
+    if (res.rows() == 0 || res.columns() == 0) {
+        send_call_result(*session->ws, unique_id, "{}");
+        return;
+    }
+
+    // Build JSON from result
+    std::string body;
+    if (res.rows() == 1) {
+        const char* val = res.value(0, 0);
+        body = val ? val : "null";
+    } else {
+        // Multiple rows: build array of first-column values
+        nlohmann::json arr = nlohmann::json::array();
+        for (int r = 0; r < res.rows(); ++r) {
+            const char* val = res.value(r, 0);
+            if (val) {
+                try {
+                    arr.push_back(nlohmann::json::parse(val));
+                } catch (...) {
+                    arr.push_back(val);
+                }
+            }
+        }
+        body = arr.dump();
+    }
+
+    // Check for application-level error
+    std::string error_message;
+    int error_code = check_pg_error(body, error_message);
+    if (error_code != 0) {
+        int status = static_cast<int>(error_code_to_status(error_code));
+        send_call_error(*session->ws, unique_id, status, error_message);
+
+        // De-authorize on 401
+        if (status == 401) {
+            session->secret.clear();
+            session->auth = Authorization{};
+            session->authorized = false;
+        }
+        return;
+    }
+
+    // Update session state based on action
+    try {
+        auto j = nlohmann::json::parse(body);
+        after_query(*session, action, j);
+    } catch (...) {
+        // Non-JSON result — still send it
+    }
+
+    send_call_result(*session->ws, unique_id, body);
+}
+
+// ─── after_query ────────────────────────────────────────────────────────────
+
+void WebSocketAPI::after_query(WsSession& session, std::string_view action,
+                               const nlohmann::json& payload)
+{
+    if (action == "/api/v1/sign/in") {
+        session.session    = payload.value("session", session.session);
+        session.secret     = payload.value("secret", session.secret);
+        session.authorized = true;
+    } else if (action == "/api/v1/sign/out") {
+        session.secret.clear();
+        session.auth = Authorization{};
+        session.authorized = false;
+    } else if (action == "/api/v1/authenticate" ||
+               action == "/api/v1/authorize") {
+        bool auth_ok = payload.value("authorized", false);
+        if (auth_ok) {
+            session.authorized = true;
+        } else {
+            session.secret.clear();
+            session.auth = Authorization{};
+            session.authorized = false;
+        }
+    }
+}
+
+// ─── Observer (LISTEN/NOTIFY) ───────────────────────────────────────────────
+
+void WebSocketAPI::init_listen()
+{
+    // First: execute daemon.init_listen() to set up PG notification channels
+    pool_.execute("SELECT daemon.init_listen()",
+        [this](std::vector<PgResult>) {
+            // Then subscribe to "notify" channel
+            pool_.listen("notify",
+                [this](std::string_view channel, std::string_view data) {
+                    on_notify(channel, data);
+                });
+        },
+        [](std::string_view) {
+            // init_listen failed — will retry on next heartbeat
+        },
+        true);  // quiet
+}
+
+void WebSocketAPI::on_notify(std::string_view /*channel*/,
+                             std::string_view data)
+{
+    // data is JSON with at least a "publisher" field
+    std::string publisher;
+    std::string notify_data(data);
+
+    try {
+        auto j = nlohmann::json::parse(data);
+        publisher = j.value("publisher", "");
+    } catch (...) {
+        return;
+    }
+
+    if (publisher.empty())
+        return;
+
+    // Queue observer dispatch for each active session
+    for (auto& [fd, session] : sessions_by_fd_) {
+        if (!session->authorized)
+            continue;
+
+        observer_queue_.push_back(
+            ObserverTask{session, publisher, notify_data});
+    }
+
+    unload_queue();
+}
+
+void WebSocketAPI::unload_queue()
+{
+    while (!observer_queue_.empty() &&
+           observer_progress_ < max_observer_queue_) {
+        auto task = std::move(observer_queue_.front());
+        observer_queue_.pop_front();
+        dispatch_observer(std::move(task));
+    }
+}
+
+void WebSocketAPI::dispatch_observer(ObserverTask task)
+{
+    auto session = task.session;
+    auto publisher = task.publisher;
+
+    auto sql = fmt::format(
+        "SELECT * FROM daemon.observer({}, {}, {}, {}::jsonb, {}, {})",
+        pq_quote_literal(publisher),
+        pq_quote_literal(session->session),
+        pq_quote_literal(session->identity),
+        pq_quote_literal(task.data),
+        pq_quote_literal(session->agent),
+        pq_quote_literal(session->ip));
+
+    observer_progress_++;
+    session->update_count++;
+
+    pool_.execute(std::move(sql),
+        [this, session, publisher](std::vector<PgResult> results) {
+            session->update_count--;
+            observer_progress_--;
+
+            if (!results.empty() && results[0].ok() &&
+                results[0].rows() > 0 && results[0].columns() > 0) {
+
+                const char* val = results[0].value(0, 0);
+                if (val) {
+                    std::string body(val);
+
+                    // Check for error (401 = de-authorize)
+                    std::string error_message;
+                    int error_code = check_pg_error(body, error_message);
+                    if (error_code != 0) {
+                        int status = static_cast<int>(
+                            error_code_to_status(error_code));
+                        if (status == 401) {
+                            session->authorized = false;
+                        }
+                    } else {
+                        send_call(*session->ws,
+                                  fmt::format("/{}", publisher), body);
+                    }
+                }
+            }
+
+            unload_queue();
+        },
+        [this, session](std::string_view) {
+            session->update_count--;
+            observer_progress_--;
+            unload_queue();
+        },
+        true);  // quiet
+}
+
+// ─── HTTP handlers ──────────────────────────────────────────────────────────
+
+void WebSocketAPI::do_get(const HttpRequest& req, HttpResponse& resp)
+{
+    // GET /ws/list — list active sessions
+    if (req.path == "/ws/list") {
+        nlohmann::json arr = nlohmann::json::array();
+
+        for (const auto& [fd, session] : sessions_by_fd_) {
+            nlohmann::json s;
+            s["session"]    = session->session;
+            s["identity"]   = session->identity;
+            s["authorized"] = session->authorized;
+            s["ip"]         = session->ip;
+            s["agent"]      = session->agent;
+            arr.push_back(std::move(s));
+        }
+
+        resp.set_status(HttpStatus::ok)
+            .set_body(arr.dump(), "application/json");
+        return;
+    }
+
+    reply_error(resp, HttpStatus::not_found, "Not found.");
+}
+
+void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
+{
+    // POST /ws/<code>[/<identity>] — push data to WS clients
+    auto [code, identity] = parse_session_path(req.path);
+
+    if (code.empty() || code == "list") {
+        reply_error(resp, HttpStatus::bad_request,
+                    "POST /ws/<session_code>[/<identity>]");
+        return;
+    }
+
+    // Verify Bearer token
+    auto auth_header = req.header("Authorization");
+    if (auth_header.empty()) {
+        reply_error(resp, HttpStatus::unauthorized, "Authorization required.");
+        return;
+    }
+
+    auto auth = parse_authorization(auth_header);
+    if (auth.schema != Authorization::Schema::bearer) {
+        reply_error(resp, HttpStatus::unauthorized,
+                    "Bearer token required.");
+        return;
+    }
+
+    try {
+        verify_jwt(auth.token, providers_);
+    } catch (const JwtExpiredError&) {
+        reply_error(resp, HttpStatus::unauthorized, "Token expired.");
+        return;
+    } catch (const JwtVerificationError& e) {
+        reply_error(resp, HttpStatus::unauthorized, e.what());
+        return;
+    }
+
+    // Find matching sessions and push the message
+    bool sent = false;
+    auto range = sessions_by_code_.equal_range(code);
+    for (auto it = range.first; it != range.second; ++it) {
+        auto& session = it->second;
+        if (identity != "main" && session->identity != identity)
+            continue;
+
+        send_call(*session->ws, "/ws", req.body);
+        sent = true;
+    }
+
+    nlohmann::json result;
+    result["sent"]   = sent;
+    result["status"] = sent ? "Success" : "Session not found";
+
+    resp.set_status(HttpStatus::ok)
+        .set_body(result.dump(), "application/json");
+}
+
+} // namespace apostol
+
+#endif // defined(WITH_POSTGRESQL) && defined(WITH_SSL)
