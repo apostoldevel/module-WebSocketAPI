@@ -1,9 +1,9 @@
+[![ru](https://img.shields.io/badge/lang-ru-green.svg)](README.ru-RU.md)
+
 WebSocket API
 -
 
-[![ru](https://img.shields.io/badge/lang-ru-green.svg)](README.ru-RU.md)
-
-A **Worker module** for [Apostol](https://github.com/apostoldevel/apostol) + [db-platform](https://github.com/apostoldevel/db-platform) — **Apostol CRM**[^crm].
+**Module** for [Apostol](https://github.com/apostoldevel/apostol) + [db-platform](https://github.com/apostoldevel/db-platform) — **Apostol CRM**[^crm].
 
 Description
 -
@@ -35,24 +35,6 @@ Key database objects:
 | `api.observer_unsubscribe(publisher)` | Removes the listener for the current session |
 | `api.observer_publisher(code)` | Returns publisher metadata |
 | `api.observer_listener(publisher, session)` | Returns listener state for a session |
-
-Configuration
--
-
-```json
-{
-  "modules": {
-    "WebSocketAPI": {
-      "enabled": true
-    }
-  }
-}
-```
-
-Installation
--
-
-Follow the build and installation instructions for [Apostol](https://github.com/apostoldevel/apostol#building-and-installation).
 
 Client Connection
 -
@@ -637,5 +619,23 @@ Examples
 ```json
 {"t":2,"u":"<uuid>","a":"/method","p":{"fields":["id","class","classcode","classlabel","action","actioncode","actionname","code","label"]}}
 ```
+
+Configuration
+-
+
+```json
+{
+  "modules": {
+    "WebSocketAPI": {
+      "enabled": true
+    }
+  }
+}
+```
+
+Installation
+-
+
+Follow the build and installation instructions for [Apostol](https://github.com/apostoldevel/apostol#building-and-installation).
 
 [^crm]: **Apostol CRM** is an abstract term, not a standalone product. It refers to any project that uses both the [Apostol](https://github.com/apostoldevel/apostol) C++ framework and [db-platform](https://github.com/apostoldevel/db-platform) together through purpose-built modules and processes. Each framework can be used independently; combined, they form a full-stack backend platform.

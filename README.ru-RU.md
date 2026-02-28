@@ -1,7 +1,7 @@
+[![en](https://img.shields.io/badge/lang-en-green.svg)](README.md)
+
 WebSocket API
 -
-
-[![en](https://img.shields.io/badge/lang-en-green.svg)](README.md)
 
 **Модуль** для [Apostol](https://github.com/apostoldevel/apostol) + [db-platform](https://github.com/apostoldevel/db-platform) — **Apostol CRM**[^crm].
 
@@ -35,24 +35,6 @@ C++ модуль отвечает за WebSocket-транспорт и марш�
 | `api.observer_unsubscribe(publisher)` | Удаляет слушателя для текущей сессии |
 | `api.observer_publisher(code)` | Возвращает метаданные издателя |
 | `api.observer_listener(publisher, session)` | Возвращает состояние слушателя для сессии |
-
-Настройка
--
-
-```json
-{
-  "modules": {
-    "WebSocketAPI": {
-      "enabled": true
-    }
-  }
-}
-```
-
-Установка
--
-
-Следуйте указаниям по сборке и установке [Апостол](https://github.com/apostoldevel/apostol#сборка-и-установка).
 
 Запрос клиента
 -
@@ -639,5 +621,23 @@ POST /api/v1/observer/listener/list
 ```json
 {"t":2,"u":"<uuid>","a":"/method","p":{"fields":["id","class","classcode","classlabel","action","actioncode","actionname","code","label"]}}
 ```
+
+Настройка
+-
+
+```json
+{
+  "modules": {
+    "WebSocketAPI": {
+      "enabled": true
+    }
+  }
+}
+```
+
+Установка
+-
+
+Следуйте указаниям по сборке и установке [Апостол](https://github.com/apostoldevel/apostol#сборка-и-установка).
 
 [^crm]: **Apostol CRM** — абстрактный термин, а не самостоятельный продукт. Он обозначает любой проект, в котором совместно используются фреймворк [Apostol](https://github.com/apostoldevel/apostol) (C++) и [db-platform](https://github.com/apostoldevel/db-platform) через специально разработанные модули и процессы. Каждый фреймворк можно использовать независимо; вместе они образуют полноценную backend-платформу.
