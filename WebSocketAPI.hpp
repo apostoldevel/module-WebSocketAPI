@@ -111,6 +111,10 @@ private:
 
     int check_session_auth(const HttpRequest& req, WsSession& session);
 
+    // ── Session cleanup ─────────────────────────────────────────────────────
+
+    void check_sessions();
+
     // ── Fetch dispatch ───────────────────────────────────────────────────────
 
     void unauthorized_fetch(std::shared_ptr<WsSession> session,

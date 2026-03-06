@@ -134,6 +134,12 @@ void WebSocketAPI::heartbeat(std::chrono::system_clock::time_point now)
         init_listen();
         listen_initialized_ = true;
     }
+
+    // Cleanup dead sessions (connections dropped without proper disconnect)
+    check_sessions();
+
+    // Process any queued observer tasks
+    unload_queue();
 }
 
 // ─── parse_session_path ─────────────────────────────────────────────────────
@@ -707,6 +713,23 @@ void WebSocketAPI::after_query(WsSession& session, std::string_view action,
     }
 }
 
+// ─── check_sessions ─────────────────────────────────────────────────────────
+
+void WebSocketAPI::check_sessions()
+{
+    std::vector<int> dead_fds;
+
+    for (const auto& [fd, session] : sessions_by_fd_) {
+        if (!session->ws || session->ws->fd() < 0) {
+            if (session->update_count == 0)
+                dead_fds.push_back(fd);
+        }
+    }
+
+    for (int fd : dead_fds)
+        remove_session(fd);
+}
+
 // ─── Observer (LISTEN/NOTIFY) ───────────────────────────────────────────────
 
 void WebSocketAPI::init_listen()
@@ -790,10 +813,29 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
             if (!results.empty() && results[0].ok() &&
                 results[0].rows() > 0 && results[0].columns() > 0) {
 
-                const char* val = results[0].value(0, 0);
-                if (val) {
-                    std::string body(val);
+                const auto& res = results[0];
+                std::string body;
 
+                if (res.rows() == 1) {
+                    const char* val = res.value(0, 0);
+                    body = val ? val : "null";
+                } else {
+                    // Multiple rows: build JSON array (mirrors v1 PQResultToJson)
+                    nlohmann::json arr = nlohmann::json::array();
+                    for (int r = 0; r < res.rows(); ++r) {
+                        const char* val = res.value(r, 0);
+                        if (val) {
+                            try {
+                                arr.push_back(nlohmann::json::parse(val));
+                            } catch (...) {
+                                arr.push_back(val);
+                            }
+                        }
+                    }
+                    body = arr.dump();
+                }
+
+                if (!body.empty()) {
                     // Check for error (401 = de-authorize)
                     std::string error_message;
                     int error_code = check_pg_error(body, error_message);
@@ -872,7 +914,13 @@ void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
     }
 
     try {
-        verify_jwt(auth.token, providers_);
+        auto claims = verify_jwt(auth.token, providers_);
+        // Verify that the token belongs to this session (v1: CheckTokenAuthorization)
+        if (!claims.sub.empty() && claims.sub != code) {
+            reply_error(resp, HttpStatus::forbidden,
+                        "Token does not belong to this session.");
+            return;
+        }
     } catch (const JwtExpiredError&) {
         reply_error(resp, HttpStatus::unauthorized, "Token expired.");
         return;
