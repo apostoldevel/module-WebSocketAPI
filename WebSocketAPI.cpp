@@ -258,6 +258,10 @@ void WebSocketAPI::on_ws_upgrade(EventLoop& loop, WsConnection ws,
     check_session_auth(req, *session);
 
     int fd = session->ws->fd();
+    // Replace the HTTP handler with a WebSocket handler.
+    // The fd is already registered in epoll by the HTTP accept loop;
+    // remove it first to avoid EEXIST on add_io.
+    loop.remove_io(fd);
     loop.add_io(fd, EPOLLIN, [this, session](uint32_t) {
         bool ok = session->ws->on_readable(
             [this, session](uint8_t opcode, const std::string& payload) {
