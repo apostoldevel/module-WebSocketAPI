@@ -87,6 +87,9 @@ std::string build_error_msg(std::string_view unique_id,
 /// Default receive window for signed_fetch (milliseconds).
 constexpr int kReceiveWindowMs = 60000;
 
+/// Heartbeat / session-cleanup interval.
+constexpr auto kHeartbeatInterval = std::chrono::seconds(60);
+
 } // anonymous namespace
 
 // ─── Construction ───────────────────────────────────────────────────────────
@@ -127,7 +130,7 @@ void WebSocketAPI::heartbeat(std::chrono::system_clock::time_point now)
     if (now < next_check_)
         return;
 
-    next_check_ = now + std::chrono::seconds(60);
+    next_check_ = now + kHeartbeatInterval;
 
     // Initialize LISTEN on first heartbeat (pool is ready by then)
     if (!listen_initialized_) {
