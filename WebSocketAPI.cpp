@@ -646,25 +646,7 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
     }
 
     // Build JSON from result
-    std::string body;
-    if (res.rows() == 1) {
-        const char* val = res.value(0, 0);
-        body = val ? val : "null";
-    } else {
-        // Multiple rows: build array of first-column values
-        nlohmann::json arr = nlohmann::json::array();
-        for (int r = 0; r < res.rows(); ++r) {
-            const char* val = res.value(r, 0);
-            if (val) {
-                try {
-                    arr.push_back(nlohmann::json::parse(val));
-                } catch (...) {
-                    arr.push_back(val);
-                }
-            }
-        }
-        body = arr.dump();
-    }
+    std::string body = pg_result_to_json(res, is_list ? "array" : "");
 
     // Check for application-level error
     std::string error_message;
@@ -825,26 +807,7 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
                 results[0].rows() > 0 && results[0].columns() > 0) {
 
                 const auto& res = results[0];
-                std::string body;
-
-                if (res.rows() == 1) {
-                    const char* val = res.value(0, 0);
-                    body = val ? val : "null";
-                } else {
-                    // Multiple rows: build JSON array (mirrors v1 PQResultToJson)
-                    nlohmann::json arr = nlohmann::json::array();
-                    for (int r = 0; r < res.rows(); ++r) {
-                        const char* val = res.value(r, 0);
-                        if (val) {
-                            try {
-                                arr.push_back(nlohmann::json::parse(val));
-                            } catch (...) {
-                                arr.push_back(val);
-                            }
-                        }
-                    }
-                    body = arr.dump();
-                }
+                std::string body = pg_result_to_json(res);
 
                 if (!body.empty()) {
                     // Check for error (401 = de-authorize)
