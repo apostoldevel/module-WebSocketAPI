@@ -638,8 +638,10 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
     }
 
     const auto& res = results[0];
+    const bool is_list = (action.find("/list") != std::string::npos);
+
     if (res.rows() == 0 || res.columns() == 0) {
-        send_call_result(*session->ws, unique_id, "{}");
+        send_call_result(*session->ws, unique_id, is_list ? "[]" : "{}");
         return;
     }
 
@@ -684,6 +686,11 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
     try {
         auto j = nlohmann::json::parse(body);
         after_query(*session, action, j);
+
+        // For /list paths, ensure the response is always a JSON array
+        if (is_list && !j.is_array()) {
+            body = "[" + body + "]";
+        }
     } catch (...) {
         // Non-JSON result — still send it
     }
