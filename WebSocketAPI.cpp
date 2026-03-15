@@ -192,13 +192,6 @@ std::string WebSocketAPI::normalize_action(std::string_view action)
 // ─── Session management ─────────────────────────────────────────────────────
 
 std::shared_ptr<WebSocketAPI::WsSession>
-WebSocketAPI::find_session(int fd)
-{
-    auto it = sessions_by_fd_.find(fd);
-    return it != sessions_by_fd_.end() ? it->second : nullptr;
-}
-
-std::shared_ptr<WebSocketAPI::WsSession>
 WebSocketAPI::add_session(WsConnection ws,
                           std::string session,
                           std::string identity)

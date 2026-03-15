@@ -68,7 +68,6 @@ private:
     std::unordered_map<int, std::shared_ptr<WsSession>> sessions_by_fd_;
     std::unordered_multimap<std::string, std::shared_ptr<WsSession>> sessions_by_code_;
 
-    std::shared_ptr<WsSession> find_session(int fd);
     std::shared_ptr<WsSession> add_session(WsConnection ws,
                                            std::string session,
                                            std::string identity);
