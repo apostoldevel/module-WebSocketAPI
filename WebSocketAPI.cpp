@@ -723,14 +723,24 @@ void WebSocketAPI::check_sessions()
 
 void WebSocketAPI::init_listen()
 {
-    // First: execute daemon.init_listen() to set up PG notification channels
-    pool_.execute("SELECT daemon.init_listen()",
-        [this](std::vector<PgResult>) {
-            // Then subscribe to "notify" channel
-            pool_.listen("notify",
-                [this](std::string_view channel, std::string_view data) {
-                    on_notify(channel, data);
-                });
+    auto notify_cb = [this](std::string_view channel, std::string_view data) {
+        on_notify(channel, data);
+    };
+
+    // Subscribe to all publisher channels from db.publisher
+    pool_.execute("SELECT code FROM db.publisher",
+        [this, notify_cb](std::vector<PgResult> results) {
+            // Always listen on "notify" (platform default)
+            pool_.listen("notify", notify_cb);
+
+            // Also listen on each publisher channel (transaction, confirmation, etc.)
+            if (!results.empty() && results[0].ok()) {
+                for (int i = 0; i < results[0].rows(); ++i) {
+                    auto channel = std::string(results[0].value(i, 0));
+                    if (channel != "notify")
+                        pool_.listen(channel, notify_cb);
+                }
+            }
         },
         [](std::string_view) {
             // init_listen failed — will retry on next heartbeat
@@ -738,10 +748,10 @@ void WebSocketAPI::init_listen()
         true);  // quiet
 }
 
-void WebSocketAPI::on_notify(std::string_view /*channel*/,
+void WebSocketAPI::on_notify(std::string_view channel,
                              std::string_view data)
 {
-    // data is JSON with at least a "publisher" field
+    // data is JSON; publisher comes from payload field or channel name
     std::string publisher;
     std::string notify_data(data);
 
@@ -751,6 +761,10 @@ void WebSocketAPI::on_notify(std::string_view /*channel*/,
     } catch (...) {
         return;
     }
+
+    // Fall back to channel name as publisher (e.g., pg_notify('transaction', ...))
+    if (publisher.empty())
+        publisher = std::string(channel);
 
     if (publisher.empty())
         return;
