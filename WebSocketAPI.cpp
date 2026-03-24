@@ -132,10 +132,9 @@ void WebSocketAPI::heartbeat(std::chrono::system_clock::time_point now)
 
     next_check_ = now + kHeartbeatInterval;
 
-    // Initialize LISTEN on first heartbeat (pool is ready by then)
+    // Initialize LISTEN channels (retry until successful)
     if (!listen_initialized_) {
         init_listen();
-        listen_initialized_ = true;
     }
 
     // Cleanup dead sessions (connections dropped without proper disconnect)
@@ -741,6 +740,8 @@ void WebSocketAPI::init_listen()
                         pool_.listen(channel, notify_cb);
                 }
             }
+
+            listen_initialized_ = true;
         },
         [](std::string_view) {
             // init_listen failed — will retry on next heartbeat
