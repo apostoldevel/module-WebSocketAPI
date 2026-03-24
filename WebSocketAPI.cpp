@@ -96,6 +96,7 @@ constexpr auto kHeartbeatInterval = std::chrono::seconds(60);
 
 WebSocketAPI::WebSocketAPI(Application& app)
     : pool_(app.db_pool())
+    , listen_pool_(app.db_pool("helper"))
     , loop_(app.worker_loop())
     , providers_(app.providers())
     , enabled_(true)
@@ -726,18 +727,15 @@ void WebSocketAPI::init_listen()
         on_notify(channel, data);
     };
 
-    // Subscribe to all publisher channels from db.publisher
-    pool_.execute("SELECT code FROM db.publisher",
+    // Query publisher channels via helper pool (apibot has access to db.publisher).
+    // Then register each channel on listen_pool_ listener connection.
+    // Mirrors v1: PG_LISTEN_CONF = "helper", PG_LISTEN_NAME = "daemon.init_listen()"
+    listen_pool_.execute("SELECT code FROM db.publisher",
         [this, notify_cb](std::vector<PgResult> results) {
-            // Always listen on "notify" (platform default)
-            pool_.listen("notify", notify_cb);
-
-            // Also listen on each publisher channel (transaction, confirmation, etc.)
             if (!results.empty() && results[0].ok()) {
                 for (int i = 0; i < results[0].rows(); ++i) {
                     auto channel = std::string(results[0].value(i, 0));
-                    if (channel != "notify")
-                        pool_.listen(channel, notify_cb);
+                    listen_pool_.listen(channel, notify_cb);
                 }
             }
 

@@ -167,7 +167,8 @@ private:
 
     // ── State ────────────────────────────────────────────────────────────────
 
-    PgPool&               pool_;
+    PgPool&               pool_;         // worker pool (daemon) for queries
+    PgPool&               listen_pool_;  // helper pool (apibot) for LISTEN/NOTIFY
     EventLoop&            loop_;
     const OAuthProviders& providers_;
     bool                  enabled_;
