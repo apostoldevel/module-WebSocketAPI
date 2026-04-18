@@ -69,6 +69,8 @@ wss://ws.example.com/session/c83b2f85321f95341707624546ca6ac4fa6d1115
 wss://ws.example.com/session/c83b2f85321f95341707624546ca6ac4fa6d1115/user1
 ```
 
+**Important.** Event subscriptions are bound to the `(session, identity)` pair: the server delivers events to the exact WebSocket connection that created the subscription. When `<identity>` is present in the URL, calls to `/observer/subscribe` on that connection automatically adopt it, **unless** the payload explicitly sets `identity`. A subscription without an `identity` binding is stored under `identity = "main"` and will not reach a connection whose URL carries a different identity. Set `identity` explicitly in the payload to override — the payload value takes precedence.
+
 RPC Protocol
 -
 

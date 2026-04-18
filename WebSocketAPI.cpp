@@ -447,7 +447,27 @@ void WebSocketAPI::handle_call(std::shared_ptr<WsSession> session,
     }
 
     auto normalized = normalize_action(action);
-    auto payload_str = payload.dump();
+
+    // Bind the WS connection identity to observer subscribe/unsubscribe so the
+    // listener is stored under the same identity that daemon.observer filters
+    // by; otherwise FilterListener's strict (publisher, session, identity)
+    // match fails and events vanish for any WS URL with a custom identity.
+    nlohmann::json effective = payload;
+    if (normalized == "/api/v1/observer/subscribe" ||
+        normalized == "/api/v1/observer/unsubscribe")
+    {
+        auto inject = [&](nlohmann::json& obj) {
+            if (obj.is_object() && !obj.contains("identity"))
+                obj["identity"] = session->identity;
+        };
+        if (effective.is_array()) {
+            for (auto& item : effective) inject(item);
+        } else {
+            inject(effective);
+        }
+    }
+
+    auto payload_str = effective.dump();
 
     if (session->auth.schema == Authorization::Schema::bearer) {
         authorized_fetch(session, unique_id, normalized, payload_str);
