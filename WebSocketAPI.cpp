@@ -215,13 +215,20 @@ void WebSocketAPI::remove_session(int fd)
 
     auto session = it->second;
 
-    // Don't delete while observer queries are in-flight
-    if (session->update_count > 0)
-        return;
+    // Detach fd from epoll. EPOLLIN is level-triggered, so a closed socket
+    // would otherwise wake the event loop on every iteration and spin at
+    // 100% CPU. remove_io is idempotent (EPOLL_CTL_DEL on unknown fd is
+    // silently ignored).
+    loop_.remove_io(fd);
 
+    // Erase from BOTH indexes immediately so subsequent on_notify,
+    // dispatch_observer, check_sessions, /ws/list etc. don't see this dead
+    // session. In-flight PG callbacks keep shared_ptr<WsSession> alive;
+    // they'll complete (on a dead socket send_call returns EPIPE silently),
+    // decrement update_count, and the session object (with its
+    // WsConnection → fd) is destroyed when the last shared_ptr drops.
     sessions_by_fd_.erase(it);
 
-    // Remove from secondary index
     auto range = sessions_by_code_.equal_range(session->session);
     for (auto it2 = range.first; it2 != range.second; ) {
         if (it2->second.get() == session.get())
@@ -229,8 +236,6 @@ void WebSocketAPI::remove_session(int fd)
         else
             ++it2;
     }
-
-    loop_.remove_io(fd);
 }
 
 // ─── on_ws_upgrade ──────────────────────────────────────────────────────────
@@ -728,7 +733,7 @@ void WebSocketAPI::check_sessions()
     std::vector<int> dead_fds;
 
     for (const auto& [fd, session] : sessions_by_fd_) {
-        if (!session->ws || session->ws->fd() < 0) {
+        if (!session->ws || session->ws->fd() < 0 || session->ws->closed()) {
             if (session->update_count == 0)
                 dead_fds.push_back(fd);
         }
