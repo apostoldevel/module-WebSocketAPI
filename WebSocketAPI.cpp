@@ -224,11 +224,16 @@ void WebSocketAPI::remove_session(int fd)
     // Erase from BOTH indexes immediately so subsequent on_notify,
     // dispatch_observer, check_sessions, /ws/list etc. don't see this dead
     // session. In-flight PG callbacks keep shared_ptr<WsSession> alive;
-    // they'll complete (on a dead socket send_call returns EPIPE silently),
-    // decrement update_count, and the session object (with its
-    // WsConnection → fd) is destroyed when the last shared_ptr drops.
+    // they'll complete (on a dead socket send_call returns EPIPE silently
+    // via WsConnection::closed_), and the session (with its WsConnection →
+    // fd) is destroyed when the last shared_ptr drops.
     sessions_by_fd_.erase(it);
 
+    // sessions_by_code_ is a multimap: one session-code may map to multiple
+    // sessions (client opens several WS with different `identity` suffixes
+    // on the same session-code — e.g. "driver-pwa", "main"). Collisions are
+    // expected and bounded (typically <10 per client); linear scan of the
+    // bucket is fine.
     auto range = sessions_by_code_.equal_range(session->session);
     for (auto it2 = range.first; it2 != range.second; ) {
         if (it2->second.get() == session.get())
@@ -525,14 +530,11 @@ void WebSocketAPI::unauthorized_fetch(std::shared_ptr<WsSession> session,
         "SELECT * FROM daemon.unauthorized_fetch('POST', {}, {}::jsonb, {}, {})",
         action_q, payload_q, agent_q, host_q);
 
-    session->update_count++;
     pool_.execute(std::move(sql),
         [this, session, unique_id, action](std::vector<PgResult> results) {
-            session->update_count--;
             on_fetch_result(session, unique_id, action, std::move(results));
         },
         [this, session, unique_id](std::string_view error) {
-            session->update_count--;
             send_call_error(*session->ws, unique_id, 500,
                             std::string(error));
         });
@@ -581,14 +583,11 @@ void WebSocketAPI::authorized_fetch(std::shared_ptr<WsSession> session,
     if (sql.empty())
         return;
 
-    session->update_count++;
     pool_.execute(std::move(sql),
         [this, session, unique_id, action](std::vector<PgResult> results) {
-            session->update_count--;
             on_fetch_result(session, unique_id, action, std::move(results));
         },
         [this, session, unique_id](std::string_view error) {
-            session->update_count--;
             send_call_error(*session->ws, unique_id, 500,
                             std::string(error));
         });
@@ -628,14 +627,11 @@ void WebSocketAPI::signed_fetch(std::shared_ptr<WsSession> session,
         method_q, action_q, payload_q, session_q, nonce_q,
         signature_q, agent_q, host_q, kReceiveWindowMs);
 
-    session->update_count++;
     pool_.execute(std::move(sql),
         [this, session, unique_id, action](std::vector<PgResult> results) {
-            session->update_count--;
             on_fetch_result(session, unique_id, action, std::move(results));
         },
         [this, session, unique_id](std::string_view error) {
-            session->update_count--;
             send_call_error(*session->ws, unique_id, 500,
                             std::string(error));
         });
@@ -733,10 +729,8 @@ void WebSocketAPI::check_sessions()
     std::vector<int> dead_fds;
 
     for (const auto& [fd, session] : sessions_by_fd_) {
-        if (!session->ws || session->ws->fd() < 0 || session->ws->closed()) {
-            if (session->update_count == 0)
-                dead_fds.push_back(fd);
-        }
+        if (!session->ws || session->ws->fd() < 0 || session->ws->closed())
+            dead_fds.push_back(fd);
     }
 
     for (int fd : dead_fds)
@@ -829,11 +823,9 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
         pq_quote_literal(session->ip));
 
     observer_progress_++;
-    session->update_count++;
 
     pool_.execute(std::move(sql),
         [this, session, publisher](std::vector<PgResult> results) {
-            session->update_count--;
             observer_progress_--;
 
             if (!results.empty() && results[0].ok() &&
@@ -862,7 +854,6 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
             unload_queue();
         },
         [this, session](std::string_view) {
-            session->update_count--;
             observer_progress_--;
             unload_queue();
         },

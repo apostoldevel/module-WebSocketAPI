@@ -62,7 +62,6 @@ private:
         std::string agent;                // User-Agent
         std::string ip;                   // client IP
         bool authorized{false};
-        int update_count{0};              // reference count for safe deletion
     };
 
     std::unordered_map<int, std::shared_ptr<WsSession>> sessions_by_fd_;
