@@ -263,22 +263,53 @@ void WebSocketAPI::on_ws_upgrade(EventLoop& loop, WsConnection ws,
     check_session_auth(req, *session);
 
     int fd = session->ws->fd();
+    // Let WsConnection arm EPOLLOUT on its own when an outbound frame
+    // EAGAIN's — server-push paths (observer notifications, handlers)
+    // call send_text outside this lambda's scope, so they can't arm the
+    // loop themselves.
+    session->ws->bind_event_loop(loop);
+
     // Replace the HTTP handler with a WebSocket handler.
     // The fd is already registered in epoll by the HTTP accept loop;
     // remove it first to avoid EEXIST on add_io.
     loop.remove_io(fd);
-    loop.add_io(fd, EPOLLIN, [this, session](uint32_t) {
-        bool ok = session->ws->on_readable(
-            [this, session](uint8_t opcode, const std::string& payload) {
-                on_ws_message(session, opcode, payload);
-            },
-            [this, session]() {
-                remove_session(session->ws->fd());
-            }
-        );
-        if (!ok) {
+    loop.add_io(fd, EPOLLIN, [this, session](uint32_t events) {
+        // Peer reset/half-close. No useful IO can follow; tearing down the
+        // session immediately avoids leaving it waiting for an EPOLLIN
+        // that never comes (ET disables the fd after this event).
+        if (events & (EPOLLERR | EPOLLHUP)) {
             remove_session(session->ws->fd());
+            return;
         }
+        if (events & EPOLLIN) {
+            bool ok = session->ws->on_readable(
+                [this, session](uint8_t opcode, const std::string& payload) {
+                    on_ws_message(session, opcode, payload);
+                },
+                [this, session]() {
+                    remove_session(session->ws->fd());
+                }
+            );
+            if (!ok) {
+                remove_session(session->ws->fd());
+                return;
+            }
+        }
+        if (events & EPOLLOUT) {
+            session->ws->on_writable();
+            if (session->ws->closed()) {
+                remove_session(session->ws->fd());
+                return;
+            }
+        }
+        // Under APOSTOL_EPOLL_ET the fd was armed with EPOLLONESHOT and must
+        // be rearmed to receive further events. Include EPOLLOUT only while
+        // there are buffered bytes waiting to drain. Under LT (flag off)
+        // rearm_io is a no-op.
+        uint32_t mask = EPOLLIN;
+        if (session->ws->has_pending_writes())
+            mask |= EPOLLOUT;
+        loop_.rearm_io(session->ws->fd(), mask);
     });
 }
 
