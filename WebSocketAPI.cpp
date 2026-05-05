@@ -175,7 +175,7 @@ namespace Apostol {
                 }
 
                 if (RaiseIfError)
-                    throw EDBError(ErrorMessage.c_str());
+                    throw EDBError("%s", ErrorMessage.c_str());
 
                 if (errorCode >= 10000)
                     errorCode = errorCode / 100;
@@ -350,7 +350,7 @@ namespace Apostol {
             const auto pResult = APollQuery->Results(0);
 
             if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                QueryException(APollQuery, Delphi::Exception::EDBError(pResult->GetErrorMessage()));
+                QueryException(APollQuery, Delphi::Exception::EDBError("%s", pResult->GetErrorMessage()));
                 return;
             }
 
@@ -673,7 +673,7 @@ namespace Apostol {
                     const auto pResult = APollQuery->Results(0);
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                        throw Delphi::Exception::EDBError("%s", pResult->GetErrorMessage());
                     }
 
                     CString ErrorMessage;
@@ -808,7 +808,7 @@ namespace Apostol {
                     const auto pResult = APollQuery->Results(0);
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                        throw Delphi::Exception::EDBError("%s", pResult->GetErrorMessage());
                     }
 
                     if (pResult->nTuples() == 1) {
@@ -824,7 +824,7 @@ namespace Apostol {
                         }
 
                         if (status != CHTTPReply::ok) {
-                            throw Delphi::Exception::EDBError(errorMessage.c_str());
+                            throw Delphi::Exception::EDBError("%s", errorMessage.c_str());
                         }
                     }
 
@@ -1372,7 +1372,7 @@ namespace Apostol {
                     const auto pResult = APollQuery->Results(0);
 
                     if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                        throw Delphi::Exception::EDBError("%s", pResult->GetErrorMessage());
                     }
 
                     APollQuery->Connection()->Listeners().Add(PG_LISTEN_NAME);
