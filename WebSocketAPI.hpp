@@ -117,14 +117,12 @@ namespace Apostol {
             void InitListen();
             void CheckListen();
 
-            void InitMethods() override;
-
             void UnloadQueue();
 
             void DeleteHandler(CObserverHandler *AHandler);
             static void DeleteSession(CSession *ASession);
 
-            void CheckSession();
+            void CheckSession() const;
 
             CString VerifyToken(const CString &Token);
 
@@ -136,6 +134,8 @@ namespace Apostol {
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
 
         protected:
+
+            void InitMethods() override;
 
             CSessionManager m_SessionManager;
 
@@ -155,7 +155,7 @@ namespace Apostol {
             virtual void DoPost(CHTTPServerConnection *AConnection);
             virtual void DoWebSocket(CHTTPServerConnection *AConnection);
 
-            void DoWS(CHTTPServerConnection *AConnection, const CString &Action);
+            void DoWS(CHTTPServerConnection *AConnection, const CString &Action) const;
             void DoSession(CHTTPServerConnection *AConnection, const CString &Session, const CString &Identity);
 
             void DoSessionDisconnected(CObject *Sender);
@@ -170,7 +170,7 @@ namespace Apostol {
 
             ~CWebSocketAPI() override = default;
 
-            static class CWebSocketAPI *CreateModule(CModuleProcess *AProcess) {
+            static CWebSocketAPI *CreateModule(CModuleProcess *AProcess) {
                 return new CWebSocketAPI(AProcess, "websocket api", "module/WebSocketAPI");
             }
 

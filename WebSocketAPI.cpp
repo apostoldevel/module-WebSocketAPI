@@ -125,7 +125,7 @@ namespace Apostol {
 
             m_CheckDate = 0;
             m_Progress = 0;
-            m_MaxQueue = Config()->PostgresPollMin();
+            m_MaxQueue = Config()->PostgresPollMax();
 
             CWebSocketAPI::InitMethods();
         }
@@ -267,7 +267,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::CheckSession() {
+        void CWebSocketAPI::CheckSession() const {
             for (int i = 0; i < m_SessionManager.Count(); ++i) {
                 const auto pSession = m_SessionManager[i];
                 if (pSession->Connection() != nullptr) {
@@ -1004,7 +1004,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CWebSocketAPI::DoWS(CHTTPServerConnection *AConnection, const CString &Action) {
+        void CWebSocketAPI::DoWS(CHTTPServerConnection *AConnection, const CString &Action) const {
 
             auto &Reply = AConnection->Reply();
 
@@ -1237,7 +1237,9 @@ namespace Apostol {
                         UnauthorizedFetch(AConnection, wsmRequest.UniqueId, wsmRequest.Action, wsmRequest.Payload.ToString(), pSession->Agent(), pSession->IP());
 
                         return;
-                    } else if (wsmRequest.MessageTypeId == mtClose) {
+                    }
+
+                    if (wsmRequest.MessageTypeId == mtClose) {
                         wsmRequest.Action = _T("/api/v1/sign/out");
                         wsmRequest.MessageTypeId = mtCall;
                     }
@@ -1318,9 +1320,9 @@ namespace Apostol {
                 DoWebSocket(AConnection);
 
                 return true;
-            } else {
-                return CApostolModule::Execute(AConnection);
             }
+
+            return CApostolModule::Execute(AConnection);
         }
         //--------------------------------------------------------------------------------------------------------------
 
