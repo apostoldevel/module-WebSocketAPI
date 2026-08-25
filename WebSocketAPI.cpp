@@ -614,6 +614,12 @@ void WebSocketAPI::authorized_fetch(std::shared_ptr<WsSession> session,
     if (sql.empty())
         return;
 
+    // quiet: depending on the branch above the statement carries a bearer token,
+    // a username and password, or a session code together with its secret. PgPool
+    // logs statement text, and a dedicated postgres.log keeps it at debug — this
+    // runs on every WebSocket call, so it would be a continuous credential leak
+    // into a file that lives inside the container and is readable by any process
+    // there. Mirrors AppServer's fetch, which does the same on the HTTP side.
     pool_.execute(std::move(sql),
         [this, session, unique_id, action](std::vector<PgResult> results) {
             on_fetch_result(session, unique_id, action, std::move(results));
@@ -621,7 +627,8 @@ void WebSocketAPI::authorized_fetch(std::shared_ptr<WsSession> session,
         [this, session, unique_id](std::string_view error) {
             send_call_error(*session->ws, unique_id, 500,
                             std::string(error));
-        });
+        },
+        /*quiet=*/true);
 }
 
 void WebSocketAPI::signed_fetch(std::shared_ptr<WsSession> session,
@@ -658,6 +665,13 @@ void WebSocketAPI::signed_fetch(std::shared_ptr<WsSession> session,
         method_q, action_q, payload_q, session_q, nonce_q,
         signature_q, agent_q, host_q, kReceiveWindowMs);
 
+    // quiet: the statement carries the session code, the nonce and the signature
+    // together. The signature counts as a credential even though it is not one on
+    // its own: daemon.signed_fetch accepts the triple within pTimeWindow, so a
+    // reader of the log can REPLAY that exact call while the window is open.
+    // Forging a new call is not possible — which is why this is lighter than a
+    // password — but "not a secret" is the wrong conclusion, and the next reader
+    // would otherwise strip the flag as harmless.
     pool_.execute(std::move(sql),
         [this, session, unique_id, action](std::vector<PgResult> results) {
             on_fetch_result(session, unique_id, action, std::move(results));
@@ -665,7 +679,8 @@ void WebSocketAPI::signed_fetch(std::shared_ptr<WsSession> session,
         [this, session, unique_id](std::string_view error) {
             send_call_error(*session->ws, unique_id, 500,
                             std::string(error));
-        });
+        },
+        /*quiet=*/true);
 }
 
 // ─── PG result handling ─────────────────────────────────────────────────────
