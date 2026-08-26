@@ -6,6 +6,7 @@
 #include "apostol/event_loop.hpp"
 #include "apostol/http.hpp"
 #include "apostol/jwt.hpp"
+#include "apostol/logger.hpp"
 #include "apostol/oauth_providers.hpp"
 #include "apostol/pg.hpp"
 #include "apostol/websocket.hpp"
@@ -170,7 +171,15 @@ private:
     EventLoop&            loop_;
     const OAuthProviders& providers_;
     bool                  enabled_;
+    Logger&               log_;
     bool                  listen_initialized_{false};
+    // A publisher_list() query is in flight. Without it heartbeat() can issue a
+    // second one while the first is still queued — fail_inflight_query()
+    // re-queues rather than fails, so a query can outlive the 60s tick — and
+    // both then succeed. PgPool::listen() is NOT idempotent: it push_back's a
+    // second handler for the same channel and dispatch_notify() calls every
+    // one, so every notification would be delivered twice, then three times.
+    bool                  listen_pending_{false};
     std::chrono::system_clock::time_point next_check_{};
 };
 

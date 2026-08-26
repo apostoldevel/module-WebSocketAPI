@@ -99,6 +99,7 @@ WebSocketAPI::WebSocketAPI(Application& app)
     , loop_(app.worker_loop())
     , providers_(app.providers())
     , enabled_(true)
+    , log_(app.logger())
 {
     add_allowed_header("Authorization");
     add_allowed_header("Session");
@@ -787,26 +788,72 @@ void WebSocketAPI::check_sessions()
 
 void WebSocketAPI::init_listen()
 {
+    if (listen_pending_)
+        return;  // a publisher_list() query is already out; see listen_pending_
+
     auto notify_cb = [this](std::string_view channel, std::string_view data) {
         on_notify(channel, data);
     };
+
+    listen_pending_ = true;
 
     // Query publisher channels via helper pool (apibot) using daemon.publisher_list()
     // (SECURITY DEFINER wrapper for db.publisher). Register each channel on
     // pool_ dedicated listener connection.
     pool_.execute("SELECT * FROM daemon.publisher_list()",
         [this, notify_cb](std::vector<PgResult> results) {
-            if (!results.empty() && results[0].ok()) {
-                for (int i = 0; i < results[0].rows(); ++i) {
-                    auto channel = std::string(results[0].value(i, 0));
-                    pool_.listen(channel, notify_cb);
-                }
+            listen_pending_ = false;
+
+            // One attempt, not a retry loop. db.publisher is written by install
+            // and by patch, so within the life of this process the answer is a
+            // constant: a zero that arrives once arrives forever, and retrying
+            // it every minute is a query that can never start succeeding.
+            // Losing the subscription is handled where it belongs — PgPool
+            // restores it from its own registry, without asking again.
+            listen_initialized_ = true;
+
+            if (results.empty() || !results[0].ok()) {
+                log_.error("WebSocketAPI: daemon.publisher_list() returned no usable result "
+                           "— no channels subscribed, this worker will publish nothing");
+                return;
             }
 
-            listen_initialized_ = true;
+            int registered = 0;
+            for (int i = 0; i < results[0].rows(); ++i) {
+                auto channel = std::string(results[0].value(i, 0));
+                pool_.listen(channel, notify_cb);
+                ++registered;
+            }
+
+            if (registered == 0) {
+                // Loud on purpose: db.publisher is populated by install/patch,
+                // so an empty set means the database is not installed — a
+                // deployment fault, not a quiet state to sit in.
+                log_.error("WebSocketAPI: daemon.publisher_list() returned ZERO publishers "
+                           "— the dashboard and the driver app will receive nothing. "
+                           "db.publisher is filled by install/patch: an empty set means "
+                           "the database is not installed, not that publishing is off");
+                return;
+            }
+
+            log_.notice("WebSocketAPI: subscribed to {} publisher channel(s)", registered);
         },
-        [](std::string_view) {
-            // init_listen failed — will retry on next heartbeat
+        [this](std::string_view error) {
+            listen_pending_ = false;
+
+            // An exception is NOT an empty publisher set, and the two must never
+            // read alike: USAGE on schema daemon is granted to daemon and apibot
+            // only, so a wrong role fails HERE with "permission denied for schema
+            // daemon" and never returns zero rows.
+            //
+            // The latch is deliberately NOT set: this branch also covers a
+            // database that is simply not up yet when the worker starts, and
+            // latching would leave that worker subscribed to nothing forever.
+            // The price is that a permanent fault repeats — which is why the
+            // line is printed at error and names itself as a query failure, so
+            // it cannot pass for waiting.
+            log_.error("WebSocketAPI: daemon.publisher_list() failed, will retry — this is a "
+                       "query or role failure, NOT an empty publisher set: {}", error);
         },
         true);  // quiet
 }
