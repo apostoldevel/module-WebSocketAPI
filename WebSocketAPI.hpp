@@ -77,6 +77,8 @@ private:
                                            std::string session,
                                            std::string identity);
     void remove_session(int fd);
+    // Change the session code and move the sessions_by_code_ entry with it.
+    void rekey_session(WsSession& session, std::string code);
 
     // ── WebSocket message handling ───────────────────────────────────────────
 

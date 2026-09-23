@@ -252,6 +252,33 @@ void WebSocketAPI::remove_session(int fd)
     }
 }
 
+void WebSocketAPI::rekey_session(WsSession& session, std::string code)
+{
+    if (code == session.session)
+        return;
+
+    // The entry is keyed by the old code: find it there, not under the new
+    // one. Left in place, remove_session() would look under the new code,
+    // miss it, and the entry (holding the connection) would outlive the
+    // socket; /ws pushes to the old code would reach this session.
+    std::shared_ptr<WsSession> self;
+    auto range = sessions_by_code_.equal_range(session.session);
+    for (auto it = range.first; it != range.second; ++it) {
+        if (it->second.get() == &session) {
+            self = it->second;
+            sessions_by_code_.erase(it);
+            break;
+        }
+    }
+
+    session.session = std::move(code);
+
+    // Not found means the socket is already gone (remove_session ran while
+    // the query was in flight) — do not bring it back into the index.
+    if (self)
+        sessions_by_code_.emplace(session.session, std::move(self));
+}
+
 // ─── on_ws_upgrade ──────────────────────────────────────────────────────────
 
 void WebSocketAPI::on_ws_upgrade(EventLoop& loop, WsConnection ws,
@@ -760,7 +787,7 @@ void WebSocketAPI::after_query(WsSession& session, std::string_view action,
                                const nlohmann::json& payload)
 {
     if (action == "/api/v1/sign/in") {
-        session.session    = payload.value("session", session.session);
+        rekey_session(session, payload.value("session", session.session));
         session.secret     = payload.value("secret", session.secret);
         session.authorized = true;
     } else if (action == "/api/v1/sign/out") {
