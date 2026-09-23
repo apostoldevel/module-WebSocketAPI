@@ -90,6 +90,14 @@ constexpr int kReceiveWindowMs = 60000;
 /// Heartbeat / session-cleanup interval.
 constexpr auto kHeartbeatInterval = std::chrono::seconds(60);
 
+/// How long a peer has to answer the server's Close before the session is dropped.
+constexpr auto kCloseGrace = std::chrono::seconds(10);
+
+bool close_sent(const auto& session)
+{
+    return session.close_sent != std::chrono::steady_clock::time_point{};
+}
+
 } // anonymous namespace
 
 // ─── Construction ───────────────────────────────────────────────────────────
@@ -368,7 +376,7 @@ int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
 void WebSocketAPI::on_ws_message(std::shared_ptr<WsSession> session,
                                  uint8_t opcode, const std::string& payload)
 {
-    if (opcode != WS_OP_TEXT)
+    if (opcode != WS_OP_TEXT || close_sent(*session))
         return;
 
     nlohmann::json msg;
@@ -691,6 +699,9 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
                                    const std::string& action,
                                    std::vector<PgResult> results)
 {
+    if (close_sent(*session))
+        return;
+
     if (results.empty() || !results[0].ok()) {
         std::string err = results.empty()
             ? "no result"
@@ -774,9 +785,11 @@ void WebSocketAPI::after_query(WsSession& session, std::string_view action,
 void WebSocketAPI::check_sessions()
 {
     std::vector<int> dead_fds;
+    const auto now = std::chrono::steady_clock::now();
 
     for (const auto& [fd, session] : sessions_by_fd_) {
-        if (!session->ws || session->ws->fd() < 0 || session->ws->closed())
+        if (!session->ws || session->ws->fd() < 0 || session->ws->closed() ||
+            (close_sent(*session) && now - session->close_sent > kCloseGrace))
             dead_fds.push_back(fd);
     }
 
@@ -917,9 +930,17 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
 
     observer_progress_++;
 
+    // The answer belongs to the session code it was asked for. sign/in on the
+    // same socket replaces session->session (after_query); a late answer for
+    // the old code must neither close the new one nor reach it with events.
     pool_.execute(std::move(sql),
-        [this, session, publisher](std::vector<PgResult> results) {
+        [this, session, publisher, code = session->session](std::vector<PgResult> results) {
             observer_progress_--;
+
+            if (session->session != code || close_sent(*session)) {
+                unload_queue();
+                return;
+            }
 
             if (!results.empty() && results[0].ok() &&
                 results[0].rows() > 0 && results[0].columns() > 0) {
@@ -928,14 +949,32 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
                 std::string body = pg_result_to_json(res);
 
                 if (!body.empty()) {
-                    // Check for error (401 = de-authorize)
+                    // Check for error (401 = de-authorize and close).
+                    //
+                    // daemon.observer() answers 401 when the session is gone
+                    // (signed out, deleted) or SessionIn() refused it (locked,
+                    // password expired, IP table). De-authorizing alone left
+                    // the client on a socket it believed live, receiving no
+                    // more events and told nothing. Closing is the signal every
+                    // client already handles: onclose → reconnect → authorize,
+                    // which either succeeds or fails where the client sees it.
+                    // Several notifications may be queued for one session —
+                    // only the first 401 closes; the rest see close_sent.
                     std::string error_message;
                     int error_code = check_pg_error(body, error_message);
                     if (error_code != 0) {
                         int status = static_cast<int>(
                             error_code_to_status(error_code));
-                        if (status == 401) {
+                        if (status == 401 && session->authorized) {
+                            session->secret.clear();
+                            session->auth = Authorization{};
                             session->authorized = false;
+                            log_.info("WebSocketAPI: observer /{} refused the session on fd {}: {} — closing",
+                                      publisher, session->ws ? session->ws->fd() : -1,
+                                      error_message);
+                            session->close_sent = std::chrono::steady_clock::now();
+                            if (session->ws && !session->ws->closed())
+                                session->ws->send_close(1008, "Unauthorized");
                         }
                     } else {
                         send_call(*session->ws,
@@ -1026,6 +1065,8 @@ void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
     for (auto it = range.first; it != range.second; ++it) {
         auto& session = it->second;
         if (identity != "main" && session->identity != identity)
+            continue;
+        if (close_sent(*session))
             continue;
 
         send_call(*session->ws, "/ws", req.body);

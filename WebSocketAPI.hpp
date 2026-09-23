@@ -63,6 +63,11 @@ private:
         std::string agent;                // User-Agent
         std::string ip;                   // client IP
         bool authorized{false};
+        // Set when the server sent Close (observer 401). From then on the
+        // session takes no messages and gets no data; check_sessions() drops
+        // it if the peer never answers. send_close() alone does not mark the
+        // connection closed().
+        std::chrono::steady_clock::time_point close_sent{};
     };
 
     std::unordered_map<int, std::shared_ptr<WsSession>> sessions_by_fd_;
