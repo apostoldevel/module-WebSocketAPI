@@ -11,6 +11,7 @@
 #include <chrono>
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string>
 
 namespace apostol
@@ -38,6 +39,32 @@ std::string make_unique_id()
     return fmt::format("{:x}", static_cast<uint64_t>(us));
 }
 
+/// Deepest nesting accepted in JSON from outside. nlohmann parses without
+/// recursion but copies and serialises recursively, so a document nested
+/// deep enough overflows the worker's stack — a signal, not an exception:
+/// no catch sees it. Our messages nest a few levels; 128 is far above them.
+constexpr int kMaxJsonDepth = 128;
+
+/// Longest token handed to verify_jwt. jwt::decode copies the claims
+/// recursively too; a bound on the length bounds their depth.
+constexpr std::size_t kMaxTokenLength = 8192;
+
+nlohmann::json parse_bounded(const std::string& text)
+{
+    return nlohmann::json::parse(text,
+        [](int depth, nlohmann::json::parse_event_t, nlohmann::json&) {
+            if (depth > kMaxJsonDepth)
+                throw std::out_of_range("JSON nested deeper than allowed");
+            return true;
+        });
+}
+
+/// dump() that does not throw on a string which is not UTF-8.
+std::string dump_safe(const nlohmann::json& j)
+{
+    return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
 /// Build JSON-RPC call message: {"t":2, "u":"<uid>", "a":"<action>", "p":<payload>}
 std::string build_call_msg(std::string_view action, const std::string& payload)
 {
@@ -47,12 +74,12 @@ std::string build_call_msg(std::string_view action, const std::string& payload)
     msg["a"] = action;
 
     try {
-        msg["p"] = nlohmann::json::parse(payload);
+        msg["p"] = parse_bounded(payload);
     } catch (...) {
         msg["p"] = payload;
     }
 
-    return msg.dump();
+    return dump_safe(msg);
 }
 
 /// Build JSON-RPC call_result message: {"t":3, "u":"<uid>", "p":<payload>}
@@ -64,12 +91,12 @@ std::string build_result_msg(std::string_view unique_id,
     msg["u"] = unique_id;
 
     try {
-        msg["p"] = nlohmann::json::parse(payload);
+        msg["p"] = parse_bounded(payload);
     } catch (...) {
         msg["p"] = payload;
     }
 
-    return msg.dump();
+    return dump_safe(msg);
 }
 
 /// Build JSON-RPC call_error message: {"t":4, "u":"<uid>", "c":<code>, "m":"<msg>"}
@@ -81,7 +108,7 @@ std::string build_error_msg(std::string_view unique_id,
     msg["u"] = unique_id;
     msg["c"] = code;
     msg["m"] = message;
-    return msg.dump();
+    return dump_safe(msg);
 }
 
 /// Default receive window for signed_fetch (milliseconds).
@@ -359,21 +386,30 @@ int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
         session.auth = parse_authorization(auth_header);
 
         if (session.auth.schema == Authorization::Schema::bearer) {
+            // A refused token must not stay on the session: handle_call
+            // routes by auth.schema, and a later OPEN by secret would still
+            // go out as this bearer and be refused.
+            const auto refuse = [&session]() {
+                session.auth = Authorization{};
+                session.authorized = false;
+                return -1;
+            };
+            if (session.auth.token.size() > kMaxTokenLength)
+                return refuse();
             try {
                 auto claims = verify_jwt(session.auth.token, providers_);
                 // Verify sub matches session code
-                if (!claims.sub.empty() && claims.sub != session.session) {
-                    session.authorized = false;
-                    return -1;
-                }
+                if (!claims.sub.empty() && claims.sub != session.session)
+                    return refuse();
                 session.authorized = true;
                 return 1;
             } catch (const JwtExpiredError&) {
-                session.authorized = false;
-                return -1;
+                return refuse();
             } catch (const JwtVerificationError&) {
-                session.authorized = false;
-                return -1;
+                return refuse();
+            } catch (const std::exception&) {
+                // Malformed token (jwt::decode) — see handle_open.
+                return refuse();
             }
         }
 
@@ -408,31 +444,68 @@ void WebSocketAPI::on_ws_message(std::shared_ptr<WsSession> session,
 
     nlohmann::json msg;
     try {
-        msg = nlohmann::json::parse(payload);
-    } catch (const nlohmann::json::exception&) {
+        msg = parse_bounded(payload);
+    } catch (const std::exception&) {
         send_call_error(*session->ws, "", 400, "Invalid JSON");
         return;
     }
 
-    int type = msg.value("t", -1);
-    std::string unique_id = msg.value("u", "");
-    std::string action    = msg.value("a", "");
-    nlohmann::json p = msg.contains("p") ? msg["p"] : nlohmann::json::object();
+    // The frame comes from anyone who can reach /session/, before any OPEN.
+    // This handler runs in the epoll callback of the socket, outside the
+    // HTTP dispatcher's try: an exception that leaves it ends the worker
+    // process, and every session on it. json::value() throws on a field of
+    // another type or on a message that is not an object, so the envelope is
+    // read by type, and whatever still throws below is answered, not
+    // propagated. A catch does not cover a stack overflow: the depth is
+    // bounded at parse (parse_bounded), and p is moved out, not copied.
+    if (!msg.is_object()) {
+        send_call_error(*session->ws, "", 400, "Invalid message: an object expected");
+        return;
+    }
 
-    switch (static_cast<MsgType>(type)) {
-        case MsgType::open:
-            handle_open(session, unique_id, p);
-            break;
-        case MsgType::close:
-            handle_close(session, unique_id);
-            break;
-        case MsgType::call:
-            handle_call(session, unique_id, action, p);
-            break;
-        default:
-            send_call_error(*session->ws, unique_id, 400,
-                            "Unknown message type");
-            break;
+    const auto field_str = [&msg](const char* key) -> std::string {
+        auto it = msg.find(key);
+        return (it != msg.end() && it->is_string()) ? it->get<std::string>() : std::string();
+    };
+
+    std::string unique_id = field_str("u");
+    std::string action    = field_str("a");
+
+    auto t = msg.find("t");
+    if (t == msg.end() || !t->is_number_integer()) {
+        send_call_error(*session->ws, unique_id, 400, "Unknown message type");
+        return;
+    }
+    const auto type = t->get<long long>();
+
+    nlohmann::json p = nlohmann::json::object();
+    if (auto it = msg.find("p"); it != msg.end())
+        p = std::move(*it);
+
+    try {
+        switch (type) {
+            case static_cast<long long>(MsgType::open):
+                handle_open(session, unique_id, p);
+                break;
+            case static_cast<long long>(MsgType::close):
+                handle_close(session, unique_id);
+                break;
+            case static_cast<long long>(MsgType::call):
+                handle_call(session, unique_id, action, p);
+                break;
+            default:
+                send_call_error(*session->ws, unique_id, 400,
+                                "Unknown message type");
+                break;
+        }
+    } catch (const nlohmann::json::exception& e) {
+        log_.warn("WebSocketAPI: message from {} refused: {}", session->ip, e.what());
+        if (!close_sent(*session))
+            send_call_error(*session->ws, unique_id, 400, "Invalid message.");
+    } catch (const std::exception& e) {
+        log_.error("WebSocketAPI: message from {} failed: {}", session->ip, e.what());
+        if (!close_sent(*session))
+            send_call_error(*session->ws, unique_id, 500, "Internal error.");
     }
 }
 
@@ -442,11 +515,19 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
                                const std::string& unique_id,
                                const nlohmann::json& payload)
 {
-    std::string secret = payload.value("secret", "");
-    std::string token  = payload.value("token", "");
+    const auto field_str = [&payload](const char* key) -> std::string {
+        if (!payload.is_object())
+            return {};
+        auto it = payload.find(key);
+        return (it != payload.end() && it->is_string()) ? it->get<std::string>() : std::string();
+    };
+
+    std::string secret = field_str("secret");
+    std::string token  = field_str("token");
 
     if (!secret.empty()) {
         // Authenticate via session+secret
+        session->auth       = Authorization{};   // OPEN by secret: not a bearer left from the handshake
         session->secret     = secret;
         session->authorized = false;
 
@@ -459,9 +540,13 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
 
         unauthorized_fetch(session, unique_id,
                            "/api/v1/authenticate",
-                           auth_payload.dump());
+                           dump_safe(auth_payload));
     } else if (!token.empty()) {
         // Authenticate via JWT token
+        if (token.size() > kMaxTokenLength) {
+            send_call_error(*session->ws, unique_id, 401, "Malformed token.");
+            return;
+        }
         try {
             auto claims = verify_jwt(token, providers_);
             // Check that sub matches session
@@ -476,6 +561,12 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
         } catch (const JwtVerificationError& e) {
             send_call_error(*session->ws, unique_id, 401, e.what());
             return;
+        } catch (const std::exception&) {
+            // Not a token at all: verify_jwt starts with jwt::decode outside
+            // its own try, so wrong segments or broken base64 throw jwt-cpp's
+            // exception, not ours (as in AppServer::check_auth).
+            send_call_error(*session->ws, unique_id, 401, "Malformed token.");
+            return;
         }
 
         session->auth.schema = Authorization::Schema::bearer;
@@ -489,7 +580,7 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
 
         unauthorized_fetch(session, unique_id,
                            "/api/v1/authorize",
-                           auth_payload.dump());
+                           dump_safe(auth_payload));
     } else {
         send_call_error(*session->ws, unique_id, 400,
                         "OPEN requires 'secret' or 'token'.");
@@ -544,7 +635,7 @@ void WebSocketAPI::handle_call(std::shared_ptr<WsSession> session,
         }
     }
 
-    auto payload_str = effective.dump();
+    auto payload_str = dump_safe(effective);
 
     if (session->auth.schema == Authorization::Schema::bearer) {
         authorized_fetch(session, unique_id, normalized, payload_str);
@@ -1070,6 +1161,11 @@ void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
         return;
     }
 
+    if (auth.token.size() > kMaxTokenLength) {
+        reply_error(resp, HttpStatus::unauthorized, "Malformed token.");
+        return;
+    }
+
     try {
         auto claims = verify_jwt(auth.token, providers_);
         // Verify that the token belongs to this session (v1: CheckTokenAuthorization)
@@ -1083,6 +1179,11 @@ void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
         return;
     } catch (const JwtVerificationError& e) {
         reply_error(resp, HttpStatus::unauthorized, e.what());
+        return;
+    } catch (const std::exception&) {
+        // Malformed token (jwt::decode) — see handle_open. Left uncaught it
+        // reaches the dispatcher, which drops the connection without an answer.
+        reply_error(resp, HttpStatus::unauthorized, "Malformed token.");
         return;
     }
 
