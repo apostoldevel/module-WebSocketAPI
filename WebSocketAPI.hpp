@@ -181,11 +181,14 @@ private:
     Logger&               log_;
     bool                  listen_initialized_{false};
     // A publisher_list() query is in flight. Without it heartbeat() can issue a
-    // second one while the first is still queued — fail_inflight_query()
-    // re-queues rather than fails, so a query can outlive the 60s tick — and
-    // both then succeed. PgPool::listen() is NOT idempotent: it push_back's a
-    // second handler for the same channel and dispatch_notify() calls every
-    // one, so every notification would be delivered twice, then three times.
+    // second one while the first is still queued — the pool holds a query
+    // while no connection is ready, so it can outlive the 60s tick — and both
+    // then succeed. (One lost with its connection after it went out is not
+    // sent again since T627: it fails, the error handler clears this flag and
+    // the next tick asks again.) PgPool::listen() is NOT idempotent: it
+    // push_back's a second handler for the same channel and dispatch_notify()
+    // calls every one, so every notification would be delivered twice, then
+    // three times.
     bool                  listen_pending_{false};
     std::chrono::system_clock::time_point next_check_{};
 };
