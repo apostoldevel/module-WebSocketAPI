@@ -688,6 +688,12 @@ void WebSocketAPI::unauthorized_fetch(std::shared_ptr<WsSession> session,
         "SELECT * FROM daemon.unauthorized_fetch('POST', {}, {}::jsonb, {}, {})",
         action_q, payload_q, agent_q, host_q);
 
+    // quiet: the credential here is not an argument but the CONTENT of the
+    // payload — /authenticate carries the session code with its secret on every
+    // (re)connect, /sign/in and /sign/up the user's password. PgPool logs
+    // statement text, and a dedicated postgres.log keeps it at debug. Measured on
+    // ocpp-css prod 28–30.09 (T713): 364 session code + secret pairs in clear
+    // text. Mirrors AppServer's unauthorised branch, quiet for the same reason.
     pool_.execute(std::move(sql),
         [this, session, unique_id, action](std::vector<PgResult> results) {
             on_fetch_result(session, unique_id, action, std::move(results));
@@ -695,7 +701,8 @@ void WebSocketAPI::unauthorized_fetch(std::shared_ptr<WsSession> session,
         [this, session, unique_id](std::string_view error) {
             send_call_error(*session->ws, unique_id, 500,
                             std::string(error));
-        });
+        },
+        /*quiet=*/true);
 }
 
 void WebSocketAPI::authorized_fetch(std::shared_ptr<WsSession> session,
