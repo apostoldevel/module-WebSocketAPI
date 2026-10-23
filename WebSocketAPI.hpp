@@ -27,10 +27,11 @@ class Application;
 //
 // Worker module for real-time WebSocket API. Implements JSON-RPC protocol
 // over WebSocket, observer/pub-sub via PostgreSQL LISTEN/NOTIFY, and
-// REST endpoints for push messaging and session listing.
+// a REST endpoint for push messaging.
 //
 // WebSocket path: /session/<code>[/<identity>]
-// HTTP paths:     POST /ws/<code>[/<identity>], GET /ws/list
+// HTTP path:      POST /ws/<code>[/<identity>]
+// (GET /ws/list, an unauthenticated session dump, removed in T1061.)
 //
 // Mirrors v1 CWebSocketAPI from apostol-crm.
 //

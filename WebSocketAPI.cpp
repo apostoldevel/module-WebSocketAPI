@@ -258,7 +258,7 @@ void WebSocketAPI::remove_session(int fd)
     loop_.remove_io(fd);
 
     // Erase from BOTH indexes immediately so subsequent on_notify,
-    // dispatch_observer, check_sessions, /ws/list etc. don't see this dead
+    // dispatch_observer, check_sessions etc. don't see this dead
     // session. In-flight PG callbacks keep shared_ptr<WsSession> alive;
     // they'll complete (on a dead socket send_call returns EPIPE silently
     // via WsConnection::closed_), and the session (with its WsConnection →
@@ -1121,25 +1121,14 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
 
 void WebSocketAPI::do_get(const HttpRequest& req, HttpResponse& resp)
 {
-    // GET /ws/list — list active sessions
-    if (req.path == "/ws/list") {
-        nlohmann::json arr = nlohmann::json::array();
-
-        for (const auto& [fd, session] : sessions_by_fd_) {
-            nlohmann::json s;
-            s["session"]    = session->session;
-            s["identity"]   = session->identity;
-            s["authorized"] = session->authorized;
-            s["ip"]         = session->ip;
-            s["agent"]      = session->agent;
-            arr.push_back(std::move(s));
-        }
-
-        resp.set_status(HttpStatus::ok)
-            .set_body(arr.dump(), "application/json");
-        return;
-    }
-
+    // No GET route. GET /ws/list used to list every live session — its code,
+    // identity, authorized flag, peer address and user agent — to anyone who
+    // asked, with no authorization at all (SERP finding, apostol-csms T1061).
+    // A session code is a credential in this stack: it is what the __Host-SID
+    // cookie carries and what FileServer accepts in a Session header. The
+    // listing was a diagnostic inherited from apostol-crm with no consumer in
+    // the product (web/driver apps use the /session/<code> socket; the OCPP
+    // console reads /ws/log in cs), so it is removed rather than gated.
     reply_error(resp, HttpStatus::not_found, "Not found.");
 }
 
