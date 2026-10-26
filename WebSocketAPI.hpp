@@ -64,6 +64,18 @@ private:
         std::string agent;                // User-Agent
         std::string ip;                   // client IP
         bool authorized{false};
+        // The credential was checked for THIS code, not only presented: a
+        // handshake token verified here whose sub equals the code; the
+        // database's success on an OPEN (/authenticate by this code's secret,
+        // /authorize with a token whose sub equals the code); /sign/in, which
+        // moves the socket to the session the database just issued. Never a
+        // CALL to /authenticate or /authorize: its payload names any session.
+        // authorized is wider — Basic and Session+Secret on the handshake set
+        // it with no check, the database checks them per call (WSA.DEV.02); a
+        // push (POST /ws/<code>) has no check of its own, so it goes only to a
+        // verified socket (apostol-csms T1066).
+        bool verified{false};
+        bool open_token_own{false};       // the pending OPEN token's sub equals the code
         // Set when the server sent Close (observer 401). From then on the
         // session takes no messages and gets no data; check_sessions() drops
         // it if the peer never answers. send_close() alone does not mark the
@@ -106,13 +118,15 @@ private:
 
     // ── PG result handling ───────────────────────────────────────────────────
 
+    // @p open — the statement answers an OPEN (handle_open), not a CALL.
     void on_fetch_result(std::shared_ptr<WsSession> session,
                          const std::string& unique_id,
                          const std::string& action,
-                         std::vector<PgResult> results);
+                         std::vector<PgResult> results,
+                         bool open = false);
 
     void after_query(WsSession& session, std::string_view action,
-                     const nlohmann::json& payload);
+                     const nlohmann::json& payload, bool open);
 
     // ── Authorization ────────────────────────────────────────────────────────
 
@@ -127,7 +141,8 @@ private:
     void unauthorized_fetch(std::shared_ptr<WsSession> session,
                             const std::string& unique_id,
                             const std::string& action,
-                            const std::string& payload);
+                            const std::string& payload,
+                            bool open = false);
 
     void authorized_fetch(std::shared_ptr<WsSession> session,
                           const std::string& unique_id,

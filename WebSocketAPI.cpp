@@ -392,6 +392,7 @@ int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
             const auto refuse = [&session]() {
                 session.auth = Authorization{};
                 session.authorized = false;
+                session.verified   = false;
                 return -1;
             };
             if (session.auth.token.size() > kMaxTokenLength)
@@ -402,6 +403,7 @@ int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
                 if (!claims.sub.empty() && claims.sub != session.session)
                     return refuse();
                 session.authorized = true;
+                session.verified   = claims.sub == session.session;   // an empty sub fits any code
                 return 1;
             } catch (const JwtExpiredError&) {
                 return refuse();
@@ -415,6 +417,7 @@ int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
 
         if (session.auth.schema == Authorization::Schema::basic) {
             session.authorized = true;
+            session.verified   = false;
             return 1;
         }
     }
@@ -426,11 +429,13 @@ int WebSocketAPI::check_session_auth(const HttpRequest& req, WsSession& session)
     if (!sess_hdr.empty() && !secret_hdr.empty()) {
         session.secret = std::move(secret_hdr);
         session.authorized = true;
+        session.verified   = false;
         return 1;
     }
 
     // No auth — must OPEN later
     session.authorized = false;
+    session.verified   = false;
     return 0;
 }
 
@@ -530,6 +535,8 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
         session->auth       = Authorization{};   // OPEN by secret: not a bearer left from the handshake
         session->secret     = secret;
         session->authorized = false;
+        session->verified   = false;
+        session->open_token_own = false;
 
         // Build payload for unauthorized_fetch
         nlohmann::json auth_payload;
@@ -540,13 +547,14 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
 
         unauthorized_fetch(session, unique_id,
                            "/api/v1/authenticate",
-                           dump_safe(auth_payload));
+                           dump_safe(auth_payload), /*open=*/true);
     } else if (!token.empty()) {
         // Authenticate via JWT token
         if (token.size() > kMaxTokenLength) {
             send_call_error(*session->ws, unique_id, 401, "Malformed token.");
             return;
         }
+        bool own = false;
         try {
             auto claims = verify_jwt(token, providers_);
             // Check that sub matches session
@@ -555,6 +563,7 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
                                 "Token subject does not match session.");
                 return;
             }
+            own = claims.sub == session->session;
         } catch (const JwtExpiredError&) {
             send_call_error(*session->ws, unique_id, 401, "Token expired.");
             return;
@@ -572,6 +581,8 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
         session->auth.schema = Authorization::Schema::bearer;
         session->auth.token  = token;
         session->authorized  = false;
+        session->verified    = false;
+        session->open_token_own = own;
 
         nlohmann::json auth_payload;
         auth_payload["session"] = session->session;
@@ -580,7 +591,7 @@ void WebSocketAPI::handle_open(std::shared_ptr<WsSession> session,
 
         unauthorized_fetch(session, unique_id,
                            "/api/v1/authorize",
-                           dump_safe(auth_payload));
+                           dump_safe(auth_payload), /*open=*/true);
     } else {
         send_call_error(*session->ws, unique_id, 400,
                         "OPEN requires 'secret' or 'token'.");
@@ -675,7 +686,8 @@ void WebSocketAPI::send_call_error(WsConnection& ws,
 void WebSocketAPI::unauthorized_fetch(std::shared_ptr<WsSession> session,
                                       const std::string& unique_id,
                                       const std::string& action,
-                                      const std::string& payload)
+                                      const std::string& payload,
+                                      bool open)
 {
     auto action_q  = pq_quote_literal(action);
     auto payload_q = (payload.empty() || payload == "{}" || payload == "[]")
@@ -695,8 +707,8 @@ void WebSocketAPI::unauthorized_fetch(std::shared_ptr<WsSession> session,
     // ocpp-css prod 28–30.09 (T713): 364 session code + secret pairs in clear
     // text. Mirrors AppServer's unauthorised branch, quiet for the same reason.
     pool_.execute(std::move(sql),
-        [this, session, unique_id, action](std::vector<PgResult> results) {
-            on_fetch_result(session, unique_id, action, std::move(results));
+        [this, session, unique_id, action, open](std::vector<PgResult> results) {
+            on_fetch_result(session, unique_id, action, std::move(results), open);
         },
         [this, session, unique_id](std::string_view error) {
             send_call_error(*session->ws, unique_id, 500,
@@ -822,7 +834,8 @@ void WebSocketAPI::signed_fetch(std::shared_ptr<WsSession> session,
 void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
                                    const std::string& unique_id,
                                    const std::string& action,
-                                   std::vector<PgResult> results)
+                                   std::vector<PgResult> results,
+                                   bool open)
 {
     if (close_sent(*session))
         return;
@@ -859,6 +872,8 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
             session->secret.clear();
             session->auth = Authorization{};
             session->authorized = false;
+            session->verified   = false;
+            session->open_token_own = false;
         }
         return;
     }
@@ -866,7 +881,7 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
     // Update session state based on action
     try {
         auto j = nlohmann::json::parse(body);
-        after_query(*session, action, j);
+        after_query(*session, action, j, open);
 
         // For /list paths, ensure the response is always a JSON array
         if (is_list && !j.is_array()) {
@@ -882,25 +897,37 @@ void WebSocketAPI::on_fetch_result(std::shared_ptr<WsSession> session,
 // ─── after_query ────────────────────────────────────────────────────────────
 
 void WebSocketAPI::after_query(WsSession& session, std::string_view action,
-                               const nlohmann::json& payload)
+                               const nlohmann::json& payload, bool open)
 {
     if (action == "/api/v1/sign/in") {
+        // Verified only when the answer names the session the socket moves
+        // to; otherwise it would stay under the code it was opened on.
+        const bool named = payload.is_object() && payload.contains("session");
         rekey_session(session, payload.value("session", session.session));
         session.secret     = payload.value("secret", session.secret);
         session.authorized = true;
+        session.verified   = named;
     } else if (action == "/api/v1/sign/out") {
         session.secret.clear();
         session.auth = Authorization{};
         session.authorized = false;
+        session.verified   = false;
+        session.open_token_own = false;
     } else if (action == "/api/v1/authenticate" ||
                action == "/api/v1/authorize") {
         bool auth_ok = payload.value("authorized", false);
         if (auth_ok) {
             session.authorized = true;
+            // Only an OPEN's answer: it asked about this code. /authorize
+            // checks the code alone (the token was checked here), so a token
+            // without sub would verify any code.
+            session.verified   = open && (action == "/api/v1/authenticate" || session.open_token_own);
         } else {
             session.secret.clear();
             session.auth = Authorization{};
             session.authorized = false;
+            session.verified   = false;
+            session.open_token_own = false;
         }
     }
 }
@@ -1094,6 +1121,8 @@ void WebSocketAPI::dispatch_observer(ObserverTask task)
                             session->secret.clear();
                             session->auth = Authorization{};
                             session->authorized = false;
+                            session->verified   = false;
+                            session->open_token_own = false;
                             log_.info("WebSocketAPI: observer /{} refused the session on fd {}: {} — closing",
                                       publisher, session->ws ? session->ws->fd() : -1,
                                       error_message);
@@ -1191,6 +1220,13 @@ void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
         if (identity != "main" && session->identity != identity)
             continue;
         if (close_sent(*session))
+            continue;
+        // Holding the code is not holding the session: a socket on
+        // /session/<code> that never proved a credential for this code — none
+        // at all, a refused one, Basic or Session+Secret handshake headers,
+        // which only the database checks, per call — gets nothing
+        // (apostol-csms T1066, WSA.DEV.02).
+        if (!session->verified)
             continue;
 
         send_call(*session->ws, "/ws", req.body);
