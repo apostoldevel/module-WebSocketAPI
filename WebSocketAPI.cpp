@@ -1044,9 +1044,17 @@ void WebSocketAPI::on_notify(std::string_view channel,
     if (publisher.empty())
         return;
 
-    // Queue observer dispatch for each active session
+    // Queue observer dispatch for each socket that proved a credential for its
+    // code. daemon.observer admits by the session code alone (SessionIn with no
+    // secret) and EventListener returns the events of that code's subscription,
+    // keyed by (publisher, code, identity). A socket that only holds the code —
+    // Basic or Session+Secret handshake headers, which set authorized with no
+    // check and are verified by the database per CALL (WSA.DEV.02), reusing the
+    // code holder's identity — would otherwise ride the holder's subscription
+    // and receive its events. Gating on verified, not authorized, closes that
+    // road the same way the removed POST /ws was closed (apostol-csms T1066).
     for (auto& [fd, session] : sessions_by_fd_) {
-        if (!session->authorized)
+        if (!session->verified)
             continue;
 
         observer_queue_.push_back(
@@ -1163,82 +1171,18 @@ void WebSocketAPI::do_get(const HttpRequest& req, HttpResponse& resp)
 
 void WebSocketAPI::do_post(const HttpRequest& req, HttpResponse& resp)
 {
-    // POST /ws/<code>[/<identity>] — push data to WS clients
-    auto [code, identity] = parse_session_path(req.path);
-
-    if (code.empty() || code == "list") {
-        reply_error(resp, HttpStatus::bad_request,
-                    "POST /ws/<session_code>[/<identity>]");
-        return;
-    }
-
-    // Verify Bearer token
-    auto auth_header = req.header("Authorization");
-    if (auth_header.empty()) {
-        reply_error(resp, HttpStatus::unauthorized, "Authorization required.");
-        return;
-    }
-
-    auto auth = parse_authorization(auth_header);
-    if (auth.schema != Authorization::Schema::bearer) {
-        reply_error(resp, HttpStatus::unauthorized,
-                    "Bearer token required.");
-        return;
-    }
-
-    if (auth.token.size() > kMaxTokenLength) {
-        reply_error(resp, HttpStatus::unauthorized, "Malformed token.");
-        return;
-    }
-
-    try {
-        auto claims = verify_jwt(auth.token, providers_);
-        // Verify that the token belongs to this session (v1: CheckTokenAuthorization)
-        if (!claims.sub.empty() && claims.sub != code) {
-            reply_error(resp, HttpStatus::forbidden,
-                        "Token does not belong to this session.");
-            return;
-        }
-    } catch (const JwtExpiredError&) {
-        reply_error(resp, HttpStatus::unauthorized, "Token expired.");
-        return;
-    } catch (const JwtVerificationError& e) {
-        reply_error(resp, HttpStatus::unauthorized, e.what());
-        return;
-    } catch (const std::exception&) {
-        // Malformed token (jwt::decode) — see handle_open. Left uncaught it
-        // reaches the dispatcher, which drops the connection without an answer.
-        reply_error(resp, HttpStatus::unauthorized, "Malformed token.");
-        return;
-    }
-
-    // Find matching sessions and push the message
-    bool sent = false;
-    auto range = sessions_by_code_.equal_range(code);
-    for (auto it = range.first; it != range.second; ++it) {
-        auto& session = it->second;
-        if (identity != "main" && session->identity != identity)
-            continue;
-        if (close_sent(*session))
-            continue;
-        // Holding the code is not holding the session: a socket on
-        // /session/<code> that never proved a credential for this code — none
-        // at all, a refused one, Basic or Session+Secret handshake headers,
-        // which only the database checks, per call — gets nothing
-        // (apostol-csms T1066, WSA.DEV.02).
-        if (!session->verified)
-            continue;
-
-        send_call(*session->ws, "/ws", req.body);
-        sent = true;
-    }
-
-    nlohmann::json result;
-    result["sent"]   = sent;
-    result["status"] = sent ? "Success" : "Session not found";
-
-    resp.set_status(HttpStatus::ok)
-        .set_body(result.dump(), "application/json");
+    // No POST route. POST /ws/<code> used to push a body to every socket on a
+    // session code. It had no sender anywhere in the product — nginx on prod
+    // logged no 2xx for 47 days, and no caller exists in any layer (db/sql,
+    // backend/src outside this module, ocpp/src, go, ai-service, the
+    // frontends); the only matches are copies of this module and /ws/log,
+    // which is cs's own CSService, a different service (apostol-csms T1061
+    // measurement, T1066). Its reach was the server push, and the server push
+    // now travels only the observer road (/session/<code>, on_notify), gated
+    // on a verified credential. A diagnostic with no consumer and the same
+    // reach as a gated road is removed, not re-gated — as GET /ws/list was in
+    // T1061 (apostol-csms T1066, WSA.DEV.02).
+    reply_error(resp, HttpStatus::not_found, "Not found.");
 }
 
 } // namespace apostol

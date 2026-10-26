@@ -71,9 +71,10 @@ private:
         // moves the socket to the session the database just issued. Never a
         // CALL to /authenticate or /authorize: its payload names any session.
         // authorized is wider — Basic and Session+Secret on the handshake set
-        // it with no check, the database checks them per call (WSA.DEV.02); a
-        // push (POST /ws/<code>) has no check of its own, so it goes only to a
-        // verified socket (apostol-csms T1066).
+        // it with no check, the database checks them per call (WSA.DEV.02).
+        // The server push (observer dispatch in on_notify) goes only to a
+        // verified socket, so a socket that merely holds the code cannot ride
+        // the code holder's subscription (apostol-csms T1066).
         bool verified{false};
         bool open_token_own{false};       // the pending OPEN token's sub equals the code
         // Set when the server sent Close (observer 401). From then on the
