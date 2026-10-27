@@ -136,6 +136,9 @@ private:
     // ── Session cleanup ─────────────────────────────────────────────────────
 
     void check_sessions();
+    // Ping the sockets the peer has gone quiet on; drop those that do not
+    // answer (WsKeepAlive). Every heartbeat, ahead of the 60 s throttle.
+    void keep_alive();
 
     // ── Fetch dispatch ───────────────────────────────────────────────────────
 
@@ -196,6 +199,10 @@ private:
     const OAuthProviders& providers_;
     bool                  enabled_;
     Logger&               log_;
+    // module.WebSocketAPI.ping_interval / ping_timeout, seconds; off when
+    // absent. A tunnel nobody writes to is cut on the way (a proxy's idle
+    // limit, a NAT entry) and neither side learns of it until it sends.
+    WsKeepAlive           keepalive_;
     bool                  listen_initialized_{false};
     // A publisher_list() query is in flight. Without it heartbeat() can issue a
     // second one while the first is still queued — the pool holds a query

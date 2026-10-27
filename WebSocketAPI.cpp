@@ -135,6 +135,7 @@ WebSocketAPI::WebSocketAPI(Application& app)
     , providers_(app.providers())
     , enabled_(true)
     , log_(app.logger())
+    , keepalive_(WsKeepAlive::from_config(app.module_config("WebSocketAPI"), "module.WebSocketAPI"))
 {
     add_allowed_header("Authorization");
     add_allowed_header("Session");
@@ -163,6 +164,8 @@ void WebSocketAPI::init_methods()
 
 void WebSocketAPI::heartbeat(std::chrono::system_clock::time_point now)
 {
+    keep_alive();
+
     if (now < next_check_)
         return;
 
@@ -942,6 +945,29 @@ void WebSocketAPI::check_sessions()
     for (const auto& [fd, session] : sessions_by_fd_) {
         if (!session->ws || session->ws->fd() < 0 || session->ws->closed() ||
             (close_sent(*session) && now - session->close_sent > kCloseGrace))
+            dead_fds.push_back(fd);
+    }
+
+    for (int fd : dead_fds)
+        remove_session(fd);
+}
+
+// ─── keep_alive ─────────────────────────────────────────────────────────────
+
+void WebSocketAPI::keep_alive()
+{
+    if (!keepalive_.enabled())
+        return;
+
+    std::vector<int> dead_fds;
+    const auto now = std::chrono::steady_clock::now();
+
+    for (const auto& [fd, session] : sessions_by_fd_) {
+        // A socket the server already closed waits for the peer's answer
+        // under kCloseGrace; a ping after it would be noise.
+        if (!session->ws || session->ws->closed() || close_sent(*session))
+            continue;
+        if (keepalive_.step(*session->ws, now) == WsKeepAlive::Step::closed)
             dead_fds.push_back(fd);
     }
 
